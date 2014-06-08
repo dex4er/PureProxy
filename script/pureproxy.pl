@@ -2,6 +2,8 @@
 
 no warnings;
 
+our $VERSION = '0.0100';
+
 BEGIN {
     *warnings::import = sub { };
 }
@@ -22,6 +24,21 @@ my $app = builder {
 };
 
 use Plack::Runner;
-my $runner = Plack::Runner->new;
-$runner->parse_options(qw(-s Starlight -E proxy), @ARGV);
+
+use Starlight;
+use Plack;
+
+sub version {
+    print "PureProxy/$VERSION Starlight/", Starlight->VERSION, " Plack/", Plack->VERSION, " Perl/$]\n";
+}
+
+my $runner = Plack::Runner->new(
+    server     => 'Starlight',
+    env        => 'proxy',
+    loader     => 'Delayed',
+    version_cb => \&version,
+);
+
+$runner->parse_options('--server-software', "PureProxy/$VERSION", @ARGV);
+
 $runner->run($app);
