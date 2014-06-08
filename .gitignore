@@ -34,6 +34,5 @@ pm_to_blib
 tmon.out
 
 /fatpacker.trace
-/pureproxy
 /packlists
 /fatlib/
