@@ -23814,13 +23814,18 @@ $fatpacked{"Starlight/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<
   
           chdir File::Spec->rootdir              or die "Cannot chdir to root directory: $!\n";
   
-          open STDIN,  '<', File::Spec->devnull  or die "Cannot open null device for reading: $!\n";
-          open STDOUT, '>', File::Spec->devnull  or die "Cannot open null device for writing: $!\n";
+          open my $devnull,  '+>', File::Spec->devnull or die "Cannot open null device: $!\n";
+  
+          open STDIN, '>&', $devnull             or die "Cannot dup null device: $!\n";
+          open STDOUT, '>&', $devnull            or die "Cannot dup null device: $!\n";
   
           defined(my $pid = fork)                or die "Cannot fork: $!\n";
-          if ($self->{pid} and $pid) {
-              print $pidfh "$pid\n"              or die "Cannot write pidfile $self->{pid}: $!\n";
-              close $pidfh;
+          if ($pid) {
+              if ($self->{pid} and $pid) {
+                  print $pidfh "$pid\n"          or die "Cannot write pidfile $self->{pid}: $!\n";
+                  close $pidfh;
+                  open STDERR, '>&', $devnull    or die "Cannot dup null device: $!\n";
+              }
               exit;
           }
   
@@ -23831,7 +23836,7 @@ $fatpacked{"Starlight/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<
           }
   
           if (not defined $self->{error_log}) {
-              open STDERR, '>&', \*STDOUT        or die "Cannot dup null device for writing: $!\n";
+              open STDERR, '>&', $devnull        or die "Cannot dup null device: $!\n";
           }
       }
   
@@ -30428,7 +30433,19 @@ unshift @INC, bless \%fatpacked, $class;
   } # END OF FATPACK CODE
 
 
+=head1 NAME
+
+pureproxy - a Pure Perl HTTP proxy server
+
+=head1 SYNOPSIS
+
+  pureproxy --port=5000 --workers=10
+
+=cut
+
 no warnings;
+
+our $VERSION = '0.0100';
 
 BEGIN {
     *warnings::import = sub { };
@@ -30450,6 +30467,21 @@ my $app = builder {
 };
 
 use Plack::Runner;
-my $runner = Plack::Runner->new;
-$runner->parse_options(qw(-s Starlight -E proxy), @ARGV);
-$runner->run($app);
+
+use Starlight;
+use Plack;
+
+sub version {
+    print "PureProxy/$VERSION Starlight/", Starlight->VERSION, " Plack/", Plack->VERSION, " Perl/$]\n";
+}
+
+my $runner = Plack::Runner->new(
+    server     => 'Starlight',
+    env        => 'proxy',
+    loader     => 'Delayed',
+    version_cb => \&version,
+);
+
+$runner->parse_options('--server-software', "PureProxy/$VERSION", @ARGV);
+
+$runner->run;#($app);
