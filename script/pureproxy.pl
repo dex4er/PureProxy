@@ -1,5 +1,15 @@
 #!/usr/bin/perl
 
+=head1 NAME
+
+pureproxy - a Pure Perl HTTP proxy server
+
+=head1 SYNOPSIS
+
+  pureproxy --port=5000 --workers=10
+
+=cut
+
 no warnings;
 
 our $VERSION = '0.0100';
@@ -41,4 +51,4 @@ my $runner = Plack::Runner->new(
 
 $runner->parse_options('--server-software', "PureProxy/$VERSION", @ARGV);
 
-$runner->run($app);
+$runner->run;#($app);
