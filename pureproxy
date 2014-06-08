@@ -30484,4 +30484,4 @@ my $runner = Plack::Runner->new(
 
 $runner->parse_options('--server-software', "PureProxy/$VERSION", @ARGV);
 
-$runner->run;#($app);
+$runner->run($app);
