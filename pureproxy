@@ -21,7 +21,7 @@ $fatpacked{"Apache/LogFormat/Compiler.pm"} = '#line '.(1+__LINE__).' "'.__FILE__
       TIME => 4,
   };
   
-  our $VERSION = '0.30';
+  our $VERSION = '0.32';
   
   # copy from Plack::Middleware::AccessLog
   our %formats = (
@@ -10516,7 +10516,7 @@ $fatpacked{"POSIX/strftime/Compiler.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."
   use POSIX qw//;
   use base qw/Exporter/;
   
-  our $VERSION = "0.31";
+  our $VERSION = "0.32";
   our @EXPORT_OK = qw/strftime/;
   
   use constant {
@@ -23814,18 +23814,13 @@ $fatpacked{"Starlight/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<
   
           chdir File::Spec->rootdir              or die "Cannot chdir to root directory: $!\n";
   
-          open my $devnull,  '+>', File::Spec->devnull or die "Cannot open null device: $!\n";
-  
-          open STDIN, '>&', $devnull             or die "Cannot dup null device: $!\n";
-          open STDOUT, '>&', $devnull            or die "Cannot dup null device: $!\n";
+          open STDIN,  '<', File::Spec->devnull  or die "Cannot open null device for reading: $!\n";
+          open STDOUT, '>', File::Spec->devnull  or die "Cannot open null device for writing: $!\n";
   
           defined(my $pid = fork)                or die "Cannot fork: $!\n";
-          if ($pid) {
-              if ($self->{pid} and $pid) {
-                  print $pidfh "$pid\n"          or die "Cannot write pidfile $self->{pid}: $!\n";
-                  close $pidfh;
-                  open STDERR, '>&', $devnull    or die "Cannot dup null device: $!\n";
-              }
+          if ($self->{pid} and $pid) {
+              print $pidfh "$pid\n"              or die "Cannot write pidfile $self->{pid}: $!\n";
+              close $pidfh;
               exit;
           }
   
@@ -23836,7 +23831,7 @@ $fatpacked{"Starlight/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<
           }
   
           if (not defined $self->{error_log}) {
-              open STDERR, '>&', $devnull        or die "Cannot dup null device: $!\n";
+              open STDERR, '>&', \*STDOUT        or die "Cannot dup null device for writing: $!\n";
           }
       }
   
@@ -23993,7 +23988,7 @@ $fatpacked{"Stream/Buffered.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<
   use Stream::Buffered::File;
   use Stream::Buffered::PerlIO;
   
-  our $VERSION = 0.02;
+  our $VERSION = 0.03;
   
   our $MaxMemoryBufferSize = 1024 * 1024;
   
