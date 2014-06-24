@@ -33,6 +33,6 @@ nytprof.out
 pm_to_blib
 tmon.out
 
-/fatpacker.trace
-/packlists
-/fatlib/
+/examples/fatpacker.trace
+/examples/packlists
+/examples/fatlib/

@@ -33,12 +33,14 @@ delete=`
     done
 `
 
-# cpanm --reinstall parent Exporter HTTP::Tiny
+# cpanm --reinstall if parent Exporter HTTP::Tiny
+
+cd `dirname $0`
 
 rm -f fatpacker.trace packlist pureproxy
 rm -rf fatlib
 
-PLACK_HTTP_PARSER_PP=1 fatpack trace $use script/pureproxy.pl
+PLACK_HTTP_PARSER_PP=1 fatpack trace $use ../script/pureproxy.pl
 
 sed -i "$delete" fatpacker.trace
 
@@ -47,6 +49,7 @@ fatpack packlists-for `cat fatpacker.trace` >packlists
 fatpack tree `cat packlists`
 
 for mod in \
+    if \
     parent \
     Exporter \
     HTTP::Tiny \
@@ -57,7 +60,7 @@ done
 
 rm -rf fatlib/auto/share
 
-fatpack file script/pureproxy.pl > pureproxy
+fatpack file ../script/pureproxy.pl > pureproxy
 
 sed -i 's,^#!.*/perl$,#!/usr/bin/env perl,' pureproxy
 chmod +x pureproxy

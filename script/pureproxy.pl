@@ -18,6 +18,8 @@ BEGIN {
     *warnings::import = sub { };
 }
 
+use constant SERVER => $ENV{PUREPROXY_SERVER} || $^O =~ /MSWin32|cygwin/ ? 'Thrall' : 'Starlight';
+
 BEGIN {
     delete $ENV{http_proxy};
     delete $ENV{https_proxy};
@@ -33,17 +35,18 @@ my $app = builder {
     Plack::App::Proxy->new(backend => 'HTTP::Tiny')->to_app;
 };
 
+use Plack;
 use Plack::Runner;
 
-use Starlight;
-use Plack;
+use if SERVER eq 'Thrall', 'Thrall';
+use if SERVER eq 'Starlight', 'Starlight';
 
 sub version {
-    print "PureProxy/$VERSION Starlight/", Starlight->VERSION, " Plack/", Plack->VERSION, " Perl/$]\n";
+    print "PureProxy/$VERSION ", SERVER, "/", SERVER->VERSION, " Plack/", Plack->VERSION, " Perl/$]\n";
 }
 
 my $runner = Plack::Runner->new(
-    server     => 'Starlight',
+    server     => SERVER,
     env        => 'proxy',
     loader     => 'Delayed',
     version_cb => \&version,
