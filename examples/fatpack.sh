@@ -16,6 +16,7 @@ use=`
         Plack::App::Proxy \
         Plack::App::Proxy::Backend::HTTP::Tiny \
         Plack::Handler::Starlight \
+        Plack::Handler::Thrall \
         Plack::Middleware::AccessLog \
         Plack::Middleware::Proxy::Requests \
         Plack::Middleware::Proxy::Connect::IO \
