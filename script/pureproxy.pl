@@ -4,15 +4,6 @@
 
 pureproxy - a Pure Perl HTTP proxy server
 
-=head1 SYNOPSIS
-
-  pureproxy --port=5000 --workers=10
-
-=head1 DESCRIPTION
-
-This is pure-Perl proxy HTTP server which can be run on almost every Perl
-installation.
-
 =cut
 
 no warnings;
@@ -34,7 +25,6 @@ use Plack::Builder;
 use Plack::App::Proxy;
 
 my $app = builder {
-    enable 'AccessLog';
     enable 'Proxy::Connect::IO';
     enable 'Proxy::Requests';
     Plack::App::Proxy->new(backend => 'HTTP::Tiny')->to_app;
@@ -59,7 +49,45 @@ my $runner = Plack::Runner->new(
 
 $runner->parse_options('--server-software', "PureProxy/$VERSION", @ARGV);
 
+if ($runner->{help}) {
+    require Pod::Usage;
+    Pod::Usage::pod2usage(-verbose => 1, -input => \*DATA);
+}
+
+my %options = @{$runner->{options}};
+
+if ($options{traffic_log}) {
+    $body_eol = $options{traffic_log_body_eol};
+    if ($options{traffic_log} ne '1') {
+        open my $logfh, ">>", $options{traffic_log}
+            or die "open($options{traffic_log}): $!";
+        $logfh->autoflush(1);
+        $app = builder { enable 'TrafficLog', logger => sub { $logfh->print( @_ ) }, body_eol => $body_eol; $app; };
+    } else {
+        $app = builder { enable 'TrafficLog', body_eol => $body_eol; $app; };
+    }
+}
+
+if (not exists $options{access_log}) {
+    $app = builder { enable 'AccessLog'; $app; };
+}
+
 $runner->run($app);
+
+__DATA__
+
+=head1 SYNOPSIS
+
+  pureproxy --port=5000 --workers=10
+
+=head1 DESCRIPTION
+
+This is pure-Perl proxy HTTP server which can be run on almost every Perl
+installation.
+
+=cut
+
+__END__
 
 =head1 SEE ALSO
 

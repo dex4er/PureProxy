@@ -20,6 +20,8 @@ use=`
         Plack::Middleware::AccessLog \
         Plack::Middleware::Proxy::Requests \
         Plack::Middleware::Proxy::Connect::IO \
+        Plack::Middleware::TrafficLog \
+        Time::Local \
     ; do
         echo "--use=$mod"
     done
@@ -54,6 +56,7 @@ for mod in \
     parent \
     Exporter \
     HTTP::Tiny \
+    Time::Local \
 ; do
     path=$(echo "$mod" | sed 's,::,/,g')
     test -f fatlib/$path.pm || die "Missing module at site_perl. Reinstall it with command:\ncpanm --reinstall %s" $mod

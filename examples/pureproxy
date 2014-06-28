@@ -19899,6 +19899,293 @@ $fatpacked{"Plack/Middleware/Static.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."
   
 PLACK_MIDDLEWARE_STATIC
 
+$fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'PLACK_MIDDLEWARE_TRAFFICLOG';
+  package Plack::Middleware::TrafficLog;
+  
+  =head1 NAME
+  
+  Plack::Middleware::TrafficLog - Log headers and body of HTTP traffic
+  
+  =head1 SYNOPSIS
+  
+    # In app.psgi
+    use Plack::Builder;
+  
+    builder {
+        enable "TrafficLog", with_body => 1;
+    };
+  
+  =head1 DESCRIPTION
+  
+  This middleware logs the request and response messages with detailed
+  information about headers and body.
+  
+  The example log:
+  
+    [08/Aug/2012:16:59:47 +0200] [164836368] [127.0.0.1 -> 0:5000] [Request ]
+    |GET / HTTP/1.1|Connection: TE, close|Host: localhost:5000|TE: deflate,gzi
+    p;q=0.3|User-Agent: lwp-request/6.03 libwww-perl/6.03||
+    [08/Aug/2012:16:59:47 +0200] [164836368] [127.0.0.1 <- 0:5000] [Response]
+    |HTTP/1.0 200 OK|Content-Type: text/plain||Hello World
+  
+  This module works also with applications which have delayed response. In that
+  case each chunk is logged separately and shares the same unique ID number and
+  headers.
+  
+  The body of request and response is not logged by default. For streaming
+  responses only first chunk is logged by default.
+  
+  =for readme stop
+  
+  =cut
+  
+  
+  use 5.008;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '0.0300';
+  
+  
+  use parent 'Plack::Middleware';
+  
+  use Plack::Util::Accessor qw(
+      with_request with_response with_date with_body with_all_chunks eol body_eol logger
+      _counter _call_id
+  );
+  
+  
+  use Plack::Util;
+  
+  use Plack::Request;
+  use Plack::Response;
+  
+  use POSIX ();
+  use POSIX::strftime::GNU ();
+  use Scalar::Util ();
+  
+  
+  sub prepare_app {
+      my ($self) = @_;
+  
+      # the default values
+      $self->with_request(Plack::Util::TRUE)     unless defined $self->with_request;
+      $self->with_response(Plack::Util::TRUE)    unless defined $self->with_response;
+      $self->with_date(Plack::Util::TRUE)        unless defined $self->with_date;
+      $self->with_body(Plack::Util::FALSE)       unless defined $self->with_body;
+      $self->with_all_chunks(Plack::Util::FALSE) unless defined $self->with_all_chunks;
+      $self->body_eol(defined $self->eol ? $self->eol : ' ') unless defined $self->body_eol;
+      $self->eol('|')         unless defined $self->eol;
+  
+      $self->_counter(0);
+  };
+  
+  
+  sub _strftime {
+      my ($self, $fmt, @time) = @_;
+      my $old_locale = POSIX::setlocale(&POSIX::LC_ALL);
+      POSIX::setlocale(&POSIX::LC_ALL, 'C');
+      my $out = POSIX::strftime::GNU::strftime($fmt, @time);
+      POSIX::setlocale(&POSIX::LC_ALL, $old_locale);
+      return $out;
+  };
+  
+  sub _log_message {
+      my ($self, $type, $env, $status, $headers, $body) = @_;
+  
+      my $logger = $self->logger || sub { $env->{'psgi.errors'}->print(@_) };
+  
+      my $server_addr = sprintf '%s:%s', $env->{SERVER_NAME}, $env->{SERVER_PORT};
+      my $remote_addr = defined $env->{REMOTE_PORT}
+          ? sprintf '%s:%s', $env->{REMOTE_ADDR}, $env->{REMOTE_PORT}
+          : $env->{REMOTE_ADDR};
+  
+      my $eol = $self->eol;
+      my $body_eol = $self->body_eol;
+      $body =~ s/\015?\012/$body_eol/gs if defined $body_eol;
+  
+      my $date = $self->with_date
+          ? ('['. $self->_strftime('%d/%b/%Y:%H:%M:%S %z', localtime) . '] ')
+          : '';
+  
+      $logger->( sprintf "%s[%s] [%s %s %s] [%s] %s%s%s%s%s%s\n",
+          $date,
+          $self->_call_id,
+  
+          $remote_addr,
+          $type eq 'Request ' ? '->' : $type eq 'Response' ? '<-' : '--',
+          $server_addr,
+  
+          $type,
+  
+          $eol,
+          $status,
+          $eol,
+          $headers->as_string($eol),
+          $eol,
+          $body,
+      );
+  };
+  
+  
+  sub _log_request {
+      my ($self, $env) = @_;
+  
+      my $req = Plack::Request->new($env);
+  
+      my $status = sprintf '%s %s %s', $req->method, $req->request_uri, $req->protocol,
+      my $headers = $req->headers;
+      my $body = $self->with_body ? $req->content : '';
+  
+      $self->_log_message('Request ', $env, $status, $headers, $body);
+  };
+  
+  
+  sub _log_response {
+      my ($self, $env, $ret) = @_;
+  
+      my $res = Plack::Response->new(@$ret);
+  
+      my $status_code = $res->status;
+      my $status_message = HTTP::Status::status_message($status_code);
+  
+      my $status = sprintf 'HTTP/1.0 %s %s', $status_code, defined $status_message ? $status_message : '';
+      my $headers = $res->headers;
+      my $body = '';
+      if ($self->with_body) {
+          $body = $res->content;
+          $body = '' unless defined $body;
+          $body = join '', grep { defined $_ } @$body if ref $body eq 'ARRAY';
+      }
+  
+      $self->_log_message('Response', $env, $status, $headers, $body);
+  };
+  
+  
+  sub call {
+      my ($self, $env) = @_;
+  
+      $self->_call_id(sprintf '%015d',
+          time % 2**16 * 2**32 +
+          (Scalar::Util::looks_like_number $env->{REMOTE_PORT} ? $env->{REMOTE_PORT} : int rand 2**16) % 2**16 * 2**16 +
+          $self->_counter % 2**16);
+      $self->_counter($self->_counter + 1);
+  
+      # Preprocessing
+      $self->_log_request($env) if $self->with_request;
+  
+      # $self->app is the original app
+      my $res = $self->app->($env);
+  
+      # Postprocessing
+      return $self->with_response ? $self->response_cb($res, sub {
+          my ($ret) = @_;
+          my $seen;
+          return sub {
+              my ($chunk) = @_;
+              return if $seen and not defined $chunk;
+              return $chunk if $seen and not $self->with_all_chunks;
+              $self->_log_response($env, [ $ret->[0], $ret->[1], [$chunk] ]);
+              $seen = Plack::Util::TRUE;
+              return $chunk;
+          };
+      }) : $res;
+  };
+  
+  
+  1;
+  
+  
+  =head1 CONFIGURATION
+  
+  =over 4
+  
+  =item logger
+  
+    # traffic.l4p
+    log4perl.logger.traffic = DEBUG, LogfileTraffic
+    log4perl.appender.LogfileTraffic = Log::Log4perl::Appender::File
+    log4perl.appender.LogfileTraffic.filename = traffic.log
+    log4perl.appender.LogfileTraffic.layout = PatternLayout
+    log4perl.appender.LogfileTraffic.layout.ConversionPattern = %m{chomp}%n
+  
+    # app.psgi
+    use Log::Log4perl qw(:levels get_logger);
+    Log::Log4perl->init('traffic.l4p');
+    my $logger = get_logger('traffic');
+  
+    enable "Plack::Middleware::TrafficLog",
+        logger => sub { $logger->log($INFO, join '', @_) };
+  
+  Sets a callback to print log message to. It prints to C<psgi.errors> output
+  stream by default.
+  
+  =item with_request
+  
+  The false value disables logging of request message.
+  
+  =item with_response
+  
+  The false value disables logging of response message.
+  
+  =item with_date
+  
+  The false value disables logging of current date.
+  
+  =item with_body
+  
+  The true value enables logging of message's body.
+  
+  =item with_all_chunks
+  
+  The true value enables logging of every chunk for streaming responses.
+  
+  =item eol
+  
+  Sets the line separator for message's headers and body. The default value is
+  the pipe character C<|>.
+  
+  =item body_eol
+  
+  Sets the line separator for message's body only. The default is the space
+  character C< >. The default value is used only if B<eol> is also undefined.
+  
+  =back
+  
+  =for readme continue
+  
+  =head1 SEE ALSO
+  
+  L<Plack>, L<Plack::Middleware::AccessLog>.
+  
+  =head1 BUGS
+  
+  This module has unstable API and it can be changed in future.
+  
+  The log file can contain the binary data if the PSGI server provides binary
+  files.
+  
+  If you find the bug or want to implement new features, please report it at
+  L<http://github.com/dex4er/perl-Plack-Middleware-TrafficLog/issues>
+  
+  The code repository is available at
+  L<http://github.com/dex4er/perl-Plack-Middleware-TrafficLog>
+  
+  =head1 AUTHOR
+  
+  Piotr Roszatycki <dexter@cpan.org>
+  
+  =head1 LICENSE
+  
+  Copyright (c) 2012, 2014 Piotr Roszatycki <dexter@cpan.org>.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as perl itself.
+  
+  See L<http://dev.perl.org/licenses/artistic.html>
+PLACK_MIDDLEWARE_TRAFFICLOG
+
 $fatpacked{"Plack/Middleware/XFramework.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'PLACK_MIDDLEWARE_XFRAMEWORK';
   package Plack::Middleware::XFramework;
   use strict;
@@ -25101,6 +25388,393 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
   
   1;
 THRALL_SERVER
+
+$fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME_LOCAL';
+  package Time::Local;
+  
+  require Exporter;
+  use Carp;
+  use Config;
+  use strict;
+  
+  use vars qw( $VERSION @ISA @EXPORT @EXPORT_OK );
+  $VERSION   = '1.2300';
+  
+  @ISA       = qw( Exporter );
+  @EXPORT    = qw( timegm timelocal );
+  @EXPORT_OK = qw( timegm_nocheck timelocal_nocheck );
+  
+  my @MonthDays = ( 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 );
+  
+  # Determine breakpoint for rolling century
+  my $ThisYear    = ( localtime() )[5];
+  my $Breakpoint  = ( $ThisYear + 50 ) % 100;
+  my $NextCentury = $ThisYear - $ThisYear % 100;
+  $NextCentury += 100 if $Breakpoint < 50;
+  my $Century = $NextCentury - 100;
+  my $SecOff  = 0;
+  
+  my ( %Options, %Cheat );
+  
+  use constant SECS_PER_MINUTE => 60;
+  use constant SECS_PER_HOUR   => 3600;
+  use constant SECS_PER_DAY    => 86400;
+  
+  my $MaxDay;
+  if ($] < 5.012000) {
+      my $MaxInt;
+      if ( $^O eq 'MacOS' ) {
+          # time_t is unsigned...
+          $MaxInt = ( 1 << ( 8 * $Config{ivsize} ) ) - 1;
+      }
+      else {
+          $MaxInt = ( ( 1 << ( 8 * $Config{ivsize} - 2 ) ) - 1 ) * 2 + 1;
+      }
+  
+      $MaxDay = int( ( $MaxInt - ( SECS_PER_DAY / 2 ) ) / SECS_PER_DAY ) - 1;
+  }
+  else {
+      # recent localtime()'s limit is the year 2**31
+      $MaxDay = 365 * (2**31);
+  }
+  
+  # Determine the EPOC day for this machine
+  my $Epoc = 0;
+  if ( $^O eq 'vos' ) {
+      # work around posix-977 -- VOS doesn't handle dates in the range
+      # 1970-1980.
+      $Epoc = _daygm( 0, 0, 0, 1, 0, 70, 4, 0 );
+  }
+  elsif ( $^O eq 'MacOS' ) {
+      $MaxDay *=2 if $^O eq 'MacOS';  # time_t unsigned ... quick hack?
+      # MacOS time() is seconds since 1 Jan 1904, localtime
+      # so we need to calculate an offset to apply later
+      $Epoc = 693901;
+      $SecOff = timelocal( localtime(0)) - timelocal( gmtime(0) ) ;
+      $Epoc += _daygm( gmtime(0) );
+  }
+  else {
+      $Epoc = _daygm( gmtime(0) );
+  }
+  
+  %Cheat = ();    # clear the cache as epoc has changed
+  
+  sub _daygm {
+  
+      # This is written in such a byzantine way in order to avoid
+      # lexical variables and sub calls, for speed
+      return $_[3] + (
+          $Cheat{ pack( 'ss', @_[ 4, 5 ] ) } ||= do {
+              my $month = ( $_[4] + 10 ) % 12;
+              my $year  = $_[5] + 1900 - int($month / 10);
+  
+              ( ( 365 * $year )
+                + int( $year / 4 )
+                - int( $year / 100 )
+                + int( $year / 400 )
+                + int( ( ( $month * 306 ) + 5 ) / 10 )
+              )
+              - $Epoc;
+          }
+      );
+  }
+  
+  sub _timegm {
+      my $sec =
+          $SecOff + $_[0] + ( SECS_PER_MINUTE * $_[1] ) + ( SECS_PER_HOUR * $_[2] );
+  
+      return $sec + ( SECS_PER_DAY * &_daygm );
+  }
+  
+  sub timegm {
+      my ( $sec, $min, $hour, $mday, $month, $year ) = @_;
+  
+      if ( $year >= 1000 ) {
+          $year -= 1900;
+      }
+      elsif ( $year < 100 and $year >= 0 ) {
+          $year += ( $year > $Breakpoint ) ? $Century : $NextCentury;
+      }
+  
+      unless ( $Options{no_range_check} ) {
+          croak "Month '$month' out of range 0..11"
+              if $month > 11
+              or $month < 0;
+  
+      my $md = $MonthDays[$month];
+          ++$md
+              if $month == 1 && _is_leap_year( $year + 1900 );
+  
+          croak "Day '$mday' out of range 1..$md"  if $mday > $md or $mday < 1;
+          croak "Hour '$hour' out of range 0..23"  if $hour > 23  or $hour < 0;
+          croak "Minute '$min' out of range 0..59" if $min > 59   or $min < 0;
+          croak "Second '$sec' out of range 0..59" if $sec >= 60  or $sec < 0;
+      }
+  
+      my $days = _daygm( undef, undef, undef, $mday, $month, $year );
+  
+      unless ($Options{no_range_check} or abs($days) < $MaxDay) {
+          my $msg = '';
+          $msg .= "Day too big - $days > $MaxDay\n" if $days > $MaxDay;
+  
+          $year += 1900;
+          $msg .=  "Cannot handle date ($sec, $min, $hour, $mday, $month, $year)";
+  
+          croak $msg;
+      }
+  
+      return $sec
+             + $SecOff
+             + ( SECS_PER_MINUTE * $min )
+             + ( SECS_PER_HOUR * $hour )
+             + ( SECS_PER_DAY * $days );
+  }
+  
+  sub _is_leap_year {
+      return 0 if $_[0] % 4;
+      return 1 if $_[0] % 100;
+      return 0 if $_[0] % 400;
+  
+      return 1;
+  }
+  
+  sub timegm_nocheck {
+      local $Options{no_range_check} = 1;
+      return &timegm;
+  }
+  
+  sub timelocal {
+      my $ref_t = &timegm;
+      my $loc_for_ref_t = _timegm( localtime($ref_t) );
+  
+      my $zone_off = $loc_for_ref_t - $ref_t
+          or return $loc_for_ref_t;
+  
+      # Adjust for timezone
+      my $loc_t = $ref_t - $zone_off;
+  
+      # Are we close to a DST change or are we done
+      my $dst_off = $ref_t - _timegm( localtime($loc_t) );
+  
+      # If this evaluates to true, it means that the value in $loc_t is
+      # the _second_ hour after a DST change where the local time moves
+      # backward.
+      if ( ! $dst_off &&
+           ( ( $ref_t - SECS_PER_HOUR ) - _timegm( localtime( $loc_t - SECS_PER_HOUR ) ) < 0 )
+         ) {
+          return $loc_t - SECS_PER_HOUR;
+      }
+  
+      # Adjust for DST change
+      $loc_t += $dst_off;
+  
+      return $loc_t if $dst_off > 0;
+  
+      # If the original date was a non-extent gap in a forward DST jump,
+      # we should now have the wrong answer - undo the DST adjustment
+      my ( $s, $m, $h ) = localtime($loc_t);
+      $loc_t -= $dst_off if $s != $_[0] || $m != $_[1] || $h != $_[2];
+  
+      return $loc_t;
+  }
+  
+  sub timelocal_nocheck {
+      local $Options{no_range_check} = 1;
+      return &timelocal;
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  Time::Local - efficiently compute time from local and GMT time
+  
+  =head1 SYNOPSIS
+  
+      $time = timelocal( $sec, $min, $hour, $mday, $mon, $year );
+      $time = timegm( $sec, $min, $hour, $mday, $mon, $year );
+  
+  =head1 DESCRIPTION
+  
+  This module provides functions that are the inverse of built-in perl
+  functions C<localtime()> and C<gmtime()>. They accept a date as a
+  six-element array, and return the corresponding C<time(2)> value in
+  seconds since the system epoch (Midnight, January 1, 1970 GMT on Unix,
+  for example). This value can be positive or negative, though POSIX
+  only requires support for positive values, so dates before the
+  system's epoch may not work on all operating systems.
+  
+  It is worth drawing particular attention to the expected ranges for
+  the values provided. The value for the day of the month is the actual
+  day (ie 1..31), while the month is the number of months since January
+  (0..11). This is consistent with the values returned from
+  C<localtime()> and C<gmtime()>.
+  
+  =head1 FUNCTIONS
+  
+  =head2 C<timelocal()> and C<timegm()>
+  
+  This module exports two functions by default, C<timelocal()> and
+  C<timegm()>.
+  
+  The C<timelocal()> and C<timegm()> functions perform range checking on
+  the input $sec, $min, $hour, $mday, and $mon values by default.
+  
+  =head2 C<timelocal_nocheck()> and C<timegm_nocheck()>
+  
+  If you are working with data you know to be valid, you can speed your
+  code up by using the "nocheck" variants, C<timelocal_nocheck()> and
+  C<timegm_nocheck()>. These variants must be explicitly imported.
+  
+      use Time::Local 'timelocal_nocheck';
+  
+      # The 365th day of 1999
+      print scalar localtime timelocal_nocheck( 0, 0, 0, 365, 0, 99 );
+  
+  If you supply data which is not valid (month 27, second 1,000) the
+  results will be unpredictable (so don't do that).
+  
+  =head2 Year Value Interpretation
+  
+  Strictly speaking, the year should be specified in a form consistent
+  with C<localtime()>, i.e. the offset from 1900. In order to make the
+  interpretation of the year easier for humans, however, who are more
+  accustomed to seeing years as two-digit or four-digit values, the
+  following conventions are followed:
+  
+  =over 4
+  
+  =item *
+  
+  Years greater than 999 are interpreted as being the actual year,
+  rather than the offset from 1900. Thus, 1964 would indicate the year
+  Martin Luther King won the Nobel prize, not the year 3864.
+  
+  =item *
+  
+  Years in the range 100..999 are interpreted as offset from 1900, so
+  that 112 indicates 2012. This rule also applies to years less than
+  zero (but see note below regarding date range).
+  
+  =item *
+  
+  Years in the range 0..99 are interpreted as shorthand for years in the
+  rolling "current century," defined as 50 years on either side of the
+  current year. Thus, today, in 1999, 0 would refer to 2000, and 45 to
+  2045, but 55 would refer to 1955. Twenty years from now, 55 would
+  instead refer to 2055. This is messy, but matches the way people
+  currently think about two digit dates. Whenever possible, use an
+  absolute four digit year instead.
+  
+  =back
+  
+  The scheme above allows interpretation of a wide range of dates,
+  particularly if 4-digit years are used.
+  
+  =head2 Limits of time_t
+  
+  On perl versions older than 5.12.0, the range of dates that can be
+  actually be handled depends on the size of C<time_t> (usually a signed
+  integer) on the given platform. Currently, this is 32 bits for most
+  systems, yielding an approximate range from Dec 1901 to Jan 2038.
+  
+  Both C<timelocal()> and C<timegm()> croak if given dates outside the
+  supported range.
+  
+  As of version 5.12.0, perl has stopped using the underlying time
+  library of the operating system it's running on and has its own
+  implementation of those routines with a safe range of at least
+  +/ 2**52 (about 142 million years).
+  
+  =head2 Ambiguous Local Times (DST)
+  
+  Because of DST changes, there are many time zones where the same local
+  time occurs for two different GMT times on the same day. For example,
+  in the "Europe/Paris" time zone, the local time of 2001-10-28 02:30:00
+  can represent either 2001-10-28 00:30:00 GMT, B<or> 2001-10-28
+  01:30:00 GMT.
+  
+  When given an ambiguous local time, the timelocal() function should
+  always return the epoch for the I<earlier> of the two possible GMT
+  times.
+  
+  =head2 Non-Existent Local Times (DST)
+  
+  When a DST change causes a locale clock to skip one hour forward,
+  there will be an hour's worth of local times that don't exist. Again,
+  for the "Europe/Paris" time zone, the local clock jumped from
+  2001-03-25 01:59:59 to 2001-03-25 03:00:00.
+  
+  If the C<timelocal()> function is given a non-existent local time, it
+  will simply return an epoch value for the time one hour later.
+  
+  =head2 Negative Epoch Values
+  
+  On perl version 5.12.0 and newer, negative epoch values are fully
+  supported.
+  
+  On older versions of perl, negative epoch (C<time_t>) values, which
+  are not officially supported by the POSIX standards, are known not to
+  work on some systems. These include MacOS (pre-OSX) and Win32.
+  
+  On systems which do support negative epoch values, this module should
+  be able to cope with dates before the start of the epoch, down the
+  minimum value of time_t for the system.
+  
+  =head1 IMPLEMENTATION
+  
+  These routines are quite efficient and yet are always guaranteed to
+  agree with C<localtime()> and C<gmtime()>. We manage this by caching
+  the start times of any months we've seen before. If we know the start
+  time of the month, we can always calculate any time within the month.
+  The start times are calculated using a mathematical formula. Unlike
+  other algorithms that do multiple calls to C<gmtime()>.
+  
+  The C<timelocal()> function is implemented using the same cache. We
+  just assume that we're translating a GMT time, and then fudge it when
+  we're done for the timezone and daylight savings arguments. Note that
+  the timezone is evaluated for each date because countries occasionally
+  change their official timezones. Assuming that C<localtime()> corrects
+  for these changes, this routine will also be correct.
+  
+  =head1 BUGS
+  
+  The whole scheme for interpreting two-digit years can be considered a
+  bug.
+  
+  =head1 SUPPORT
+  
+  Support for this module is provided via the datetime@perl.org email
+  list. See http://lists.perl.org/ for more details.
+  
+  Please submit bugs to the CPAN RT system at
+  http://rt.cpan.org/NoAuth/ReportBug.html?Queue=Time-Local or via email
+  at bug-time-local@rt.cpan.org.
+  
+  =head1 COPYRIGHT
+  
+  Copyright (c) 1997-2003 Graham Barr, 2003-2007 David Rolsky.  All
+  rights reserved.  This program is free software; you can redistribute
+  it and/or modify it under the same terms as Perl itself.
+  
+  The full text of the license can be found in the LICENSE file included
+  with this module.
+  
+  =head1 AUTHOR
+  
+  This module is based on a Perl 4 library, timelocal.pl, that was
+  included with Perl 4.036, and was most likely written by Tom
+  Christiansen.
+  
+  The current version was written by Graham Barr.
+  
+  It is now being maintained separately from the Perl core by Dave
+  Rolsky, <autarch@urth.org>.
+  
+  =cut
+TIME_LOCAL
 
 $fatpacked{"Try/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TRY_TINY';
   package Try::Tiny;
@@ -31374,6 +32048,936 @@ $fatpacked{"parent.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'PARENT';
   =cut
 PARENT
 
+$fatpacked{"x86_64-linux-thread-multi/POSIX/strftime/GNU.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU';
+  #!/usr/bin/perl -c
+  
+  package POSIX::strftime::GNU;
+  
+  =head1 NAME
+  
+  POSIX::strftime::GNU - strftime with GNU extensions
+  
+  =head1 SYNOPSIS
+  
+    use POSIX::strftime::GNU;
+    use POSIX 'strftime';
+    print POSIX::strftime('%a, %d %b %Y %T %z', localtime);
+  
+  command line:
+  
+    C:\> set PERL_ANYEVENT_LOG=filter=debug
+    C:\> perl -MPOSIX::strftime::GNU -MAnyEvent -e "AE::cv->send"
+  
+  =head1 DESCRIPTION
+  
+  This is a wrapper for L<POSIX::strftime|POSIX/strftime> which implements more
+  character sequences compatible with GNU systems.
+  
+  The module is 100% compatible with format of date(1) command from GNU
+  coreutils package.
+  
+  It can be helpful if you run some software on operating system where these
+  extensions, especially C<%z> sequence, are not supported, i.e. on Microsoft
+  Windows. On such system some software can work incorrectly, i.e. logging for
+  L<Plack> and L<AnyEvent> modules might be broken.
+  
+  Even GNU C Library's strftime(3) function does not provide 100% compatibility
+  with date(1) command so this module can be useful also on Linux.
+  
+  The XS module is used if compiler is available and can module can be loaded.
+  The XS is mandatory if C<PERL_POSIX_STRFTIME_GNU_XS> environment variable is
+  true.
+  
+  The PP module is used when XS module can not be loaded or
+  C<PERL_POSIX_STRFTIME_GNU_PP> environment variable is true.
+  
+  None of these modules are loaded if both C<PERL_POSIX_STRFTIME_GNU_PP> and
+  C<PERL_POSIX_STRFTIME_GNU_XS> environment variables are defined and false.
+  
+  =for readme stop
+  
+  =cut
+  
+  
+  use 5.006;
+  use strict;
+  use warnings;
+  
+  our $VERSION = '0.0304';
+  
+  use Carp ();
+  use POSIX ();
+  
+  =head1 FUNCTIONS
+  
+  =head2 strftime
+  
+    $str = strftime($format, @time)
+  
+  This is replacement for L<POSIX::strftime|POSIX/strftime> function.
+  
+  The nanoseconds can be given as a fraction of seconds.
+  
+    use POSIX::strftime::GNU;
+    use Time::HiRes qw(gettimeofday);
+    my ($t, $nsec) = gettimeofday;
+    my @t = localtime $t;
+    $t[0] += $nsec / 10e5;
+    print strftime('%N', @t);
+  
+  =cut
+  
+  my ($xs_loaded, $pp_loaded);
+  
+  my $xs_env = $ENV{PERL_POSIX_STRFTIME_GNU_XS};
+  my $pp_env = $ENV{PERL_POSIX_STRFTIME_GNU_PP};
+  
+  if (
+       (not defined $xs_env or defined $xs_env and $xs_env )
+          and
+       (not defined $pp_env or defined $pp_env and not $pp_env )
+  ) {
+      $xs_loaded = eval {
+          require POSIX::strftime::GNU::XS;
+          no warnings 'once';
+          *strftime = *POSIX::strftime::GNU::XS::strftime;
+          1;
+      };
+      die $@ if $@ and $ENV{PERL_POSIX_STRFTIME_GNU_XS};
+  };
+  
+  if (not $xs_loaded and (not defined $pp_env or defined $pp_env and $pp_env)) {
+      require POSIX::strftime::GNU::PP;
+      no warnings 'once';
+      *strftime = *POSIX::strftime::GNU::PP::strftime;
+      $pp_loaded = 1;
+  };
+  
+  sub import {
+      my ($class) = @_;
+      *POSIX::strftime = *strftime if $xs_loaded or $pp_loaded;
+      return 1;
+  };
+  
+  1;
+  
+  
+  =head1 FORMAT
+  
+  The format argument is composed of zero or more conversion specifications.
+  Each conversion specification is composed of a C<%> (percent) character
+  followed by one or two conversion characters which specify the replacement
+  required.
+  
+  There are some extensions of ANSI C (unmarked): those given in the Single UNIX
+  Specification (marked SU), those given in Olson's timezone package (marked
+  TZ), and those given in glibc (marked GNU).
+  
+  The following conversion specifications are supported:
+  
+  =over
+  
+  =item C<%a>
+  
+  The abbreviated weekday name according to the current locale.
+  
+  =item C<%A>
+  
+  The full weekday name according to the current locale.
+  
+  =item C<%b>
+  
+  The abbreviated month name according to the current locale.
+  
+  =item C<%B>
+  
+  The full month name according to the current locale.
+  
+  =item C<%c>
+  
+  The preferred date and time representation for the current locale.
+  
+  =item C<%C>
+  
+  The century number (year/100) as a 2-digit integer. (SU)
+  
+  =item C<%d>
+  
+  The day of the month as a decimal number (range 01 to 31).
+  
+  =item C<%D>
+  
+  Equivalent to C<%m/%d/%y>. (for Americans only: Americans should note that in
+  other countries C<%d/%m/%y> is rather common. This means that in international
+  context this format is ambiguous and should not be used.) (SU)
+  
+  =item C<%e>
+  
+  Like C<%d>, the day of the month as a decimal number, but a leading zero is
+  replaced by a space. (SU)
+  
+  =item C<%E>
+  
+  Modifier: use alternative format, see below. (SU)
+  
+  =item C<%F>
+  
+  Equivalent to C<%Y-%m-%d> (the ISO 8601 date format). (C99)
+  
+  =item C<%G>
+  
+  The ISO 8601 week-based year (see NOTES) with century as a decimal number. The
+  4-digit year corresponding to the ISO week number (see C<%V>). This has the
+  same format and value as %Y, except that if the ISO week number belongs to the
+  previous or next year, that year is used instead. (TZ)
+  
+  =item C<%g>
+  
+  Like C<%G>, but without century, that is, with a 2-digit year (00-99). (TZ)
+  
+  =item C<%h>
+  
+  Equivalent to C<%b>. (SU)
+  
+  =item C<%H>
+  
+  The hour as a decimal number using a 24-hour clock (range 00 to 23).
+  
+  =item C<%I>
+  
+  The hour as a decimal number using a 12-hour clock (range 01 to 12).
+  
+  =item C<%j>
+  
+  The day of the year as a decimal number (range 001 to 366).
+  
+  =item C<%k>
+  
+  The hour (24-hour clock) as a decimal number (range 0 to 23); single digits
+  are preceded by a blank. (See also C<%H>.) (TZ)
+  
+  =item C<%l>
+  
+  The hour (12-hour clock) as a decimal number (range 1 to 12); single digits
+  are preceded by a blank. (See also C<%I>.) (TZ)
+  
+  =item C<%m>
+  
+  The month as a decimal number (range 01 to 12).
+  
+  =item C<%M>
+  
+  The minute as a decimal number (range 00 to 59).
+  
+  =item C<%n>
+  
+  A newline character. (SU)
+  
+  =item C<%N>
+  
+  Nanoseconds (range 000000000 to 999999999). It is a non-POSIX extension and
+  outputs a nanoseconds if there is floating seconds argument.
+  
+  =item C<%O>
+  
+  Modifier: use alternative format, see below. (SU)
+  
+  =item C<%p>
+  
+  Either "AM" or "PM" according to the given time value, or the corresponding
+  strings for the current locale. Noon is treated as "PM" and midnight as "AM".
+  
+  =item C<%P>
+  
+  Like C<%p> but in lowercase: "am" or "pm" or a corresponding string for the
+  current locale. (GNU)
+  
+  =item C<%r>
+  
+  The time in a.m. or p.m. notation. In the POSIX locale this is equivalent to
+  C<%I:%M:%S %p>. (SU)
+  
+  =item C<%R>
+  
+  The time in 24-hour notation (%H:%M). (SU) For a version including the
+  seconds, see C<%T> below.
+  
+  =item C<%s>
+  
+  The number of seconds since the Epoch, 1970-01-01 00:00:00 +0000 (UTC). (TZ)
+  
+  =item C<%S>
+  
+  The second as a decimal number (range 00 to 60). (The range is up to 60 to
+  allow for occasional leap seconds.)
+  
+  =item C<%t>
+  
+  A tab character. (SU)
+  
+  =item C<%T>
+  
+  The time in 24-hour notation (C<%H:%M:%S>). (SU)
+  
+  =item C<%u>
+  
+  The day of the week as a decimal, range 1 to 7, Monday being 1. See also
+  C<%w>. (SU)
+  
+  =item C<%U>
+  
+  The week number of the current year as a decimal number, range 00 to 53,
+  starting with the first Sunday as the first day of week 01. See also C<%V> and
+  C<%W>.
+  
+  =item C<%V>
+  
+  The ISO 8601 week number (see NOTES) of the current year as a decimal number,
+  range 01 to 53, where week 1 is the first week that has at least 4 days in the
+  new year. See also C<%U> and C<%W>. (SU)
+  
+  =item C<%w>
+  
+  The day of the week as a decimal, range 0 to 6, Sunday being 0. See also
+  C<%u>.
+  
+  =item C<%W>
+  
+  The week number of the current year as a decimal number, range 00 to 53,
+  starting with the first Monday as the first day of week 01.
+  
+  =item C<%x>
+  
+  The preferred date representation for the current locale without the time.
+  
+  =item C<%X>
+  
+  The preferred time representation for the current locale without the date.
+  
+  =item C<%y>
+  
+  The year as a decimal number without a century (range 00 to 99).
+  
+  =item C<%Y>
+  
+  The year as a decimal number including the century.
+  
+  =item C<%z>
+  
+  The C<+hhmm> or C<-hhmm> numeric timezone (that is, the hour and minute offset
+  from UTC). (SU)
+  
+  =item C<%Z>
+  
+  The timezone or name or abbreviation.
+  
+  =item C<%+>
+  
+  The date and time in date(1) format. (TZ) (Not supported in glibc2.)
+  
+  =item C<%%>
+  
+  A literal C<%> character.
+  
+  =back
+  
+  Some conversion specifications can be modified by preceding the conversion
+  specifier character by the C<E> or C<O> modifier to indicate that an
+  alternative format should be used. If the alternative format or specification
+  does not exist for the current locale, the behavior will be as if the
+  unmodified conversion specification were used. (SU) The Single UNIX
+  Specification mentions C<%Ec>, C<%EC>, C<%Ex>, C<%EX>, C<%Ey>, C<%EY>, C<%Od>,
+  C<%Oe>, C<%OH>, C<%OI>, C<%Om>, C<%OM>, C<%OS>, C<%Ou>, C<%OU>, C<%OV>,
+  C<%Ow>, C<%OW>, C<%Oy>, where the effect of the C<O> modifier is to use
+  alternative numeric symbols (say, roman numerals), and that of the C<E>
+  modifier is to use a locale-dependent alternative representation.
+  
+  C<%G>, C<%g>, and C<%V> yield values calculated from the week-based year
+  defined by the ISO 8601 standard. In this system, weeks start on a Monday, and
+  are numbered from 01, for the first week, up to 52 or 53, for the last week.
+  Week 1 is the first week where four or more days fall within the new year (or,
+  synonymously, week 01 is: the first week of the year that contains a Thursday;
+  or, the week that has 4 January in it). When three of fewer days of the first
+  calendar week of the new year fall within that year, then the ISO 8601
+  week-based system counts those days as part of week 53 of the preceding year.
+  For example, 1 January 2010 is a Friday, meaning that just three days of that
+  calendar week fall in 2010. Thus, the ISO 8601 week- based system considers
+  these days to be part of week 53 (C<%V>) of the year 2009 (C<%G>) ; week 01 of
+  ISO 8601 year 2010 starts on Monday, 4 January 2010.
+  
+  Glibc provides some extensions for conversion specifications. (These
+  extensions are not specified in POSIX.1-2001, but a few other systems provide
+  similar features.) Between the C<%> character and the conversion specifier
+  character, an optional flag and field width may be specified. (These precede
+  the C<E> or C<O> modifiers, if present.)
+  
+  The following flag characters are permitted:
+  
+  =over
+  
+  =item C<_>
+  
+  (underscore) Pad a numeric result string with spaces.
+  
+  =item C<->
+  
+  (dash) Do not pad a numeric result string.
+  
+  =item C<0>
+  
+  Pad a numeric result string with zeros even if the conversion specifier
+  character uses space-padding by default.
+  
+  =item C<^>
+  
+  Convert alphabetic characters in result string to upper case.
+  
+  =item C<#>
+  
+  Swap the case of the result string. (This flag only works with certain
+  conversion specifier characters, and of these, it is only really useful with
+  C<%Z>.)
+  
+  =back
+  
+  =for readme continue
+  
+  =head1 INSTALLING
+  
+  =head2 Cygwin
+  
+  This module requires C<libcrypt-devel> package.
+  
+  =head1 BUGS
+  
+  Timezone name is guessed with several heuristics so it can differ from
+  timezone name returned by date(1) command.
+  
+  If you find the bug or want to implement new features, please report it at
+  L<https://github.com/dex4er/perl-POSIX-strftime-GNU/issues>
+  
+  The code repository is available at
+  L<http://github.com/dex4er/perl-POSIX-strftime-GNU>
+  
+  =head1 AUTHOR
+  
+  Piotr Roszatycki <dexter@cpan.org>
+  
+  =head1 LICENSE
+  
+  Copyright (c) 2012-2014 Piotr Roszatycki <dexter@cpan.org>.
+  
+  Format specification is based on strftime(3) manual page which is a part of
+  the Linux man-pages project.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as perl itself.
+  
+  See L<http://dev.perl.org/licenses/artistic.html>
+X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU
+
+$fatpacked{"x86_64-linux-thread-multi/POSIX/strftime/GNU/PP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU_PP';
+  #!/usr/bin/perl -c
+  
+  package POSIX::strftime::GNU::PP;
+  
+  =head1 NAME
+  
+  POSIX::strftime::GNU::PP - Pure-Perl extension for POSIX::strftime::GNU
+  
+  =head1 SYNOPSIS
+  
+    $ export PERL_POSIX_STRFTIME_GNU_PP=1
+  
+  =head1 DESCRIPTION
+  
+  This is PP extension for POSIX::strftime which implements more character
+  sequences compatible with GNU systems.
+  
+  =cut
+  
+  
+  use 5.006;
+  use strict;
+  use warnings;
+  
+  our $VERSION = '0.0304';
+  
+  use Carp ();
+  use POSIX ();
+  use Time::Local ();
+  
+  use constant SEC   => 0;
+  use constant MIN   => 1;
+  use constant HOUR  => 2;
+  use constant MDAY  => 3;
+  use constant MON   => 4;
+  use constant YEAR  => 5;
+  use constant WDAY  => 6;
+  use constant YDAY  => 7;
+  use constant ISDST => 8;
+  
+  # $str = tzoffset (@time)
+  #
+  # Returns the C<+hhmm> or C<-hhmm> numeric timezone (the hour and minute offset
+  # from UTC).
+  
+  my $tzoffset = sub {
+      my ($colons, @t) = @_;
+  
+      # Normalize @t array, we need seconds without frac
+      $t[SEC] = int $t[SEC];
+  
+      my $diff = (exists $ENV{TZ} and $ENV{TZ} eq 'GMT')
+               ? 0
+               : Time::Local::timegm(@t) - Time::Local::timelocal(@t);
+  
+      my $h = $diff / 60 / 60;
+      my $m = $diff / 60 % 60;
+      my $s = $diff % 60;
+  
+      my $fmt = do {
+          if ($colons == 0) {
+              '%+03d%02u';
+          }
+          elsif ($colons == 1) {
+              '%+03d:%02u';
+          }
+          elsif ($colons == 2) {
+              '%+03d:%02u:%02u';
+          }
+          elsif ($colons == 3) {
+              $s ? '%+03d:%02u:%02u' : $m ? '%+03d:%02u' : '%+03d';
+          }
+          else {
+              '%%' . ':' x $colons . 'z';
+          };
+      };
+  
+      return sprintf $fmt, $h, $m, $s;
+  };
+  
+  my @offset2zone = qw(
+      -11       0 SST     -11       0 SST
+      -10       0 HAST    -09       1 HADT
+      -10       0 HST     -10       0 HST
+      -09:30    0 MART    -09:30    0 MART
+      -09       0 AKST    -08       1 AKDT
+      -09       0 GAMT    -09       0 GAMT
+      -08       0 PST     -07       1 PDT
+      -08       0 PST     -08       0 PST
+      -07       0 MST     -06       1 MDT
+      -07       0 MST     -07       0 MST
+      -06       0 CST     -05       1 CDT
+      -06       0 GALT    -06       0 GALT
+      -05       0 ECT     -05       0 ECT
+      -05       0 EST     -04       1 EDT
+      -05       1 EASST   -06       0 EAST
+      -04:30    0 VET     -04:30    0 VET
+      -04       0 AMT     -04       0 AMT
+      -04       0 AST     -03       1 ADT
+      -03:30    0 NST     -02:30    1 NDT
+      -03       0 ART     -03       0 ART
+      -03       0 PMST    -02       1 PMDT
+      -03       1 AMST    -04       0 AMT
+      -03       1 WARST   -03       1 WARST
+      -02       0 FNT     -02       0 FNT
+      -02       1 UYST    -03       0 UYT
+      -01       0 AZOT    +00       1 AZOST
+      -01       0 CVT     -01       0 CVT
+      +00       0 GMT     +00       0 GMT
+      +00       0 WET     +01       1 WEST
+      +01       0 CET     +02       1 CEST
+      +01       0 WAT     +01       0 WAT
+      +02       0 EET     +02       0 EET
+      +02       0 IST     +03       1 IDT
+      +02       1 WAST    +01       0 WAT
+      +03       0 FET     +03       0 FET
+      +03:07:04 0 zzz     +03:07:04 0 zzz
+      +03:30    0 IRST    +04:30    1 IRDT
+      +04       0 AZT     +05       1 AZST
+      +04       0 GST     +04       0 GST
+      +04:30    0 AFT     +04:30    0 AFT
+      +05       0 DAVT    +07       0 DAVT
+      +05       0 MVT     +05       0 MVT
+      +05:30    0 IST     +05:30    0 IST
+      +05:45    0 NPT     +05:45    0 NPT
+      +06       0 BDT     +06       0 BDT
+      +06:30    0 CCT     +06:30    0 CCT
+      +07       0 ICT     +07       0 ICT
+      +08       0 HKT     +08       0 HKT
+      +08:45    0 CWST    +08:45    0 CWST
+      +09       0 JST     +09       0 JST
+      +09:30    0 CST     +09:30    0 CST
+      +10       0 PGT     +10       0 PGT
+      +10:30    1 CST     +09:30    0 CST
+      +11       0 CAST    +08       0 WST
+      +11       0 NCT     +11       0 NCT
+      +11       1 EST     +10       0 EST
+      +11       1 LHST    +10:30    0 LHST
+      +11:30    0 NFT     +11:30    0 NFT
+      +12       0 FJT     +12       0 FJT
+      +13       0 TKT     +13       0 TKT
+      +13       1 NZDT    +12       0 NZST
+      +13:45    1 CHADT   +12:45    0 CHAST
+      +14       0 LINT    +14       0 LINT
+      +14       1 WSDT    +13       0 WST
+  );
+  
+  # $str = tzname (@time)
+  #
+  # Returns the abbreviation of the time zone (e.g. "UTC" or "CEST").
+  
+  my $tzname = sub {
+      my @t = @_;
+  
+      return 'GMT' if exists $ENV{TZ} and $ENV{TZ} eq 'GMT';
+  
+      my $diff = $tzoffset->(3, @t);
+  
+      my @t1 = my @t2 = @t;
+      @t1[MDAY,MON] = (1, 1);  # winter
+      @t2[MDAY,MON] = (1, 7);  # summer
+  
+      my $diff1 = $tzoffset->(3, @t1);
+      my $diff2 = $tzoffset->(3, @t2);
+  
+      for (my $i=0; $i < @offset2zone; $i += 6) {
+          next unless $offset2zone[$i] eq $diff1 and $offset2zone[$i+3] eq $diff2;
+          return $diff2 eq $diff ? $offset2zone[$i+5] : $offset2zone[$i+2];
+      }
+  
+      if ($diff =~ /^([+-])(\d\d)$/) {
+          return sprintf 'GMT%s%d', $1 eq '-' ? '+' : '-', $2;
+      };
+  
+      return 'Etc';
+  };
+  
+  use constant ISO_WEEK_START_WDAY => 1;  # Monday
+  use constant ISO_WEEK1_WDAY      => 4;  # Thursday
+  use constant YDAY_MINIMUM        => -366;
+  use constant TM_YEAR_BASE        => 1900;
+  
+  # ($days, $year_adjust) = isodaysnum (@time)
+  #
+  # Returns the number of the year's day based on ISO-8601 standard and year
+  # adjust value.
+  
+  my $isodaysnum = sub {
+      my @t = @_;
+  
+      my $isleap = sub {
+          my ($year) = @_;
+          return (($year) % 4 == 0 && (($year) % 100 != 0 || ($year) % 400 == 0));
+      };
+  
+      my $iso_week_days = sub {
+          my ($yday, $wday) = @_;
+  
+          # Add enough to the first operand of % to make it nonnegative.
+          my $big_enough_multiple_of_7 = (int(- YDAY_MINIMUM / 7) + 2) * 7;
+          return ($yday
+                  - ($yday - $wday + ISO_WEEK1_WDAY + $big_enough_multiple_of_7) % 7
+                  + ISO_WEEK1_WDAY - ISO_WEEK_START_WDAY);
+      };
+  
+      # Normalize @t array, we need WDAY
+      $t[SEC] = int $t[SEC];
+      @t = gmtime Time::Local::timegm(@t);
+  
+      # YEAR is a leap year if and only if (tp->tm_year + TM_YEAR_BASE)
+      # is a leap year, except that YEAR and YEAR - 1 both work
+      # correctly even when (tp->tm_year + TM_YEAR_BASE) would
+      # overflow.
+      my $year = ($t[YEAR] + ($t[YEAR] < 0 ? TM_YEAR_BASE % 400 : TM_YEAR_BASE % 400 - 400));
+      my $year_adjust = 0;
+      my $days = $iso_week_days->($t[YDAY], $t[WDAY]);
+  
+      if ($days < 0) {
+          # This ISO week belongs to the previous year.
+          $year_adjust = -1;
+          $days = $iso_week_days->($t[YDAY] + (365 + $isleap->($year - 1)), $t[WDAY]);
+      }
+      else {
+          my $d = $iso_week_days->($t[YDAY] - (365 + $isleap->($year)), $t[WDAY]);
+          if ($d >= 0) {
+              # This ISO week belongs to the next year.  */
+              $year_adjust = 1;
+              $days = $d;
+          };
+      };
+  
+      return ($days, $year_adjust);
+  };
+  
+  # $num = isoyearnum (@time)
+  #
+  # Returns the number of the year based on ISO-8601 standard. See
+  # L<http://en.wikipedia.org/wiki/ISO_8601> for details.
+  
+  my $isoyearnum = sub {
+      my @t = @_;
+      my ($days, $year_adjust) = $isodaysnum->(@t);
+      return sprintf '%04d', $t[YEAR] + TM_YEAR_BASE + $year_adjust;
+  };
+  
+  # $num = isoweeknum (@time)
+  #
+  # Returns the number of the week based on ISO-8601 standard. See
+  # L<http://en.wikipedia.org/wiki/ISO_8601> for details.
+  
+  my $isoweeknum = sub {
+      my @t = @_;
+      my ($days, $year_adjust) = $isodaysnum->(@t);
+      return sprintf '%02d', int($days / 7) + 1;
+  };
+  
+  
+  =head1 FUNCTIONS
+  
+  =head2 strftime_orig
+  
+    $str = strftime_orig (@time)
+  
+  This is original L<POSIX::strftime|POSIX/strftime> function.
+  
+  =cut
+  
+  *strftime_orig = *POSIX::strftime;
+  
+  my %format = (
+      C => sub { 19 + int $_[YEAR] / 100 },
+      D => sub { '%m/%d/%y' },
+      e => sub { sprintf '%2d', $_[MDAY] },
+      F => sub { '%Y-%m-%d' },
+      G => $isoyearnum,
+      g => sub { sprintf '%02d', $isoyearnum->(@_) % 100 },
+      h => sub { '%b' },
+      k => sub { sprintf '%2d', $_[HOUR] },
+      l => sub { sprintf '%2d', $_[HOUR] % 12 + ($_[HOUR] % 12 == 0 ? 12 : 0) },
+      n => sub { "\n" },
+      N => sub { substr sprintf('%.9f', $_[SEC] - int $_[SEC]), 2 },
+      P => sub { lc strftime_orig('%p', @_) },
+      r => sub { '%I:%M:%S %p' },
+      R => sub { '%H:%M' },
+      s => sub { int Time::Local::timegm(@_) },
+      t => sub { "\t" },
+      T => sub { '%H:%M:%S' },
+      u => sub { my $dw = strftime_orig('%w', @_); $dw += ($dw == 0 ? 7 : 0); $dw },
+      V => $isoweeknum,
+      z => $tzoffset,
+      Z => $tzname,
+      '%' => sub { '%%' },
+  );
+  
+  my $formats = join '', sort keys %format;
+  
+  
+  =head2 strftime
+  
+    $str = strftime($format, @time)
+  
+  This is replacement for L<POSIX::strftime|POSIX/strftime> function.
+  
+  The non-POSIX feature is that seconds can be float number.
+  
+  =cut
+  
+  sub strftime {
+      my ($fmt, @t) = @_;
+  
+      Carp::croak 'Usage: POSIX::strftime::GNU::PP::strftime(fmt, sec, min, hour, mday, mon, year, wday = -1, yday = -1, isdst = -1)'
+          unless @t >= 6 and @t <= 9;
+  
+      my $strftime_modifier = sub {
+          my ($prefix, $modifier, $format, @t) = @_;
+          my $suffix = '';
+  
+          no warnings 'uninitialized';
+          my $str = strftime("%$format", @t);
+  
+          for (;;) {
+              if ($modifier eq '_' and $suffix !~ /0/ or $modifier eq '-' and $suffix !~ /0/ and $format =~ /[aAbBDFhnpPrRtTxXZ%]$/) {
+                  $str =~ s/^([+-])(0+)(\d:.*?|\d$)/' ' x length($2) . $1 . $3/ge;
+                  $str =~ s/^(0+)(.+?)$/' ' x length($1) . $2/ge;
+              }
+              elsif ($modifier eq '-' and $suffix !~ /0/ and $format =~ /[CdgGHIjmMNsSuUVwWyYz]$/) {
+                  $str =~ s/^([+-])(0+)(\d:.*?|\d$)/$1$3/g;
+                  $str =~ s/^(0+)(.+?)$/$2/g;
+              }
+              elsif ($modifier eq '-') {
+                  $str =~ s/^ +//ge;
+              }
+              elsif ($modifier eq '0' and $suffix !~ /_/) {
+                  $str =~ s/^( +)/'0' x length($1)/ge;
+              }
+              elsif ($modifier eq '^' and "$prefix$suffix" =~ /#/ and $format =~ /Z$/) {
+                  $str = lc($str);
+              }
+              elsif ($modifier eq '^' and $format !~ /[pP]$/) {
+                  $str = uc($str);
+              }
+              elsif ($modifier eq '#' and $format =~ /[aAbBh]$/) {
+                  $str = uc($str);
+              }
+              elsif ($modifier eq '#' and $format =~ /[pZ]$/) {
+                  $str = lc($str);
+              };
+  
+              last unless $prefix =~ s/(.)$//;
+              $suffix = "$modifier$suffix";
+              $modifier = $1;
+          };
+  
+          return $str;
+      };
+  
+      my $strftime_0z = sub {
+          my ($digits, $format, @t) = @_;
+          $digits --;
+          my $str = strftime($format, @t);
+          $str =~ /^([+-])(.*)$/ or return $format;
+          return $1 . sprintf "%0${digits}s", $2;
+      };
+  
+      # recursively handle modifiers
+      $fmt =~ s/%([_0\^#-]*)([_0\^#-])((?:[1-9][0-9]*)?:*[EO]?[a-zA-Z])/$strftime_modifier->($1, $2, $3, @t)/ge;
+      $fmt =~ s/%([_0\^#-]*)([_0\^#-])((?:[1-9][0-9]*)?[%])/$strftime_modifier->($1, $2, $3, @t) . '%'/ge;
+  
+      # numbers before character
+      $fmt =~ s/%([1-9][0-9]*)([EO]?[aAbBDeFhklnpPrRtTxXZ])/sprintf("%$1s", strftime("%$2", @t))/ge;
+      $fmt =~ s/%([1-9][0-9]*)([%])/sprintf("%$1s%%", '%')/ge;
+      $fmt =~ s/%([1-9][0-9]*)([EO]?[CdGgHIjmMsSuUVwWyY])/sprintf("%0$1s", strftime("%$2", @t))/ge;
+      $fmt =~ s/%([1-9][0-9]*)([N])/sprintf("%0$1.$1s", strftime("%$2", @t))/ge;
+      $fmt =~ s/%([1-9][0-9]*)(:*[z])/$strftime_0z->($1, "%$2", @t)/ge;
+  
+      # "E", "O", ":" modifiers
+      $fmt =~ s/%E([CcXxYy])/%$1/;
+      $fmt =~ s/%O([deHIMmSUuVWwy])/%$1/;
+      $fmt =~ s/%(:{0,3})?(z)/$format{$2}->(length $1, @t)/ge;
+  
+      # supported by Pure Perl
+      $fmt =~ s/%([$formats])/$format{$1}->(@t)/ge;
+  
+      # as-is if there is some modifiers left
+      $fmt =~ s/%([_0\^#-]+(?:[1-9][0-9]*)?|[_0\^#-]?(?:[1-9][0-9]*))([a-zA-Z%])/%%$1$2/;
+  
+      return strftime_orig($fmt, @t);
+  };
+  
+  1;
+  
+  
+  =head1 PERFORMANCE
+  
+  The PP module is about 10 times slower than XS module.
+  
+  =head1 SEE ALSO
+  
+  L<POSIX::strftime::GNU>.
+  
+  =head1 AUTHOR
+  
+  Piotr Roszatycki <dexter@cpan.org>
+  
+  =head1 LICENSE
+  
+  Copyright (c) 2012-2014 Piotr Roszatycki <dexter@cpan.org>.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as perl itself.
+  
+  ISO 8601 functions:
+  
+  Copyright (c) 1991-2001, 2003-2007, 2009-2012 Free Software Foundation, Inc.
+  
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 3 of the License, or
+  (at your option) any later version.
+  
+  See L<http://dev.perl.org/licenses/artistic.html>
+X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU_PP
+
+$fatpacked{"x86_64-linux-thread-multi/POSIX/strftime/GNU/XS.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU_XS';
+  #!/usr/bin/perl -c
+  
+  package POSIX::strftime::GNU::XS;
+  
+  =head1 NAME
+  
+  POSIX::strftime::GNU::XS - XS extension for POSIX::strftime::GNU
+  
+  =head1 SYNOPSIS
+  
+    $ export PERL_POSIX_STRFTIME_GNU_XS=1
+  
+  =head1 DESCRIPTION
+  
+  This is XS extension for POSIX::strftime which implements more character
+  sequences compatible with GNU systems.
+  
+  =cut
+  
+  
+  use 5.006;
+  use strict;
+  use warnings;
+  
+  our $VERSION = '0.0304';
+  
+  use Carp ();
+  use Config;
+  use POSIX ();
+  
+  require XSLoader;
+  XSLoader::load(__PACKAGE__, $VERSION);
+  
+  
+  =head1 FUNCTIONS
+  
+  =head2 strftime
+  
+    $str = strftime($format, @time)
+  
+  This is replacement for L<POSIX::strftime|POSIX/strftime> function.
+  
+  The non-POSIX feature is that seconds can be float number.
+  
+  =cut
+  
+  
+  1;
+  
+  
+  =head1 SEE ALSO
+  
+  L<POSIX::strftime::GNU>.
+  
+  =head1 AUTHOR
+  
+  Piotr Roszatycki <dexter@cpan.org>
+  
+  =head1 LICENSE
+  
+  Copyright (c) 2012-2014 Piotr Roszatycki <dexter@cpan.org>.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as perl itself.
+  
+  strftime function:
+  
+  Copyright (c) 1991-2001, 2003-2007, 2009-2012 Free Software Foundation, Inc.
+  
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 3 of the License, or
+  (at your option) any later version.
+  
+  See L<http://dev.perl.org/licenses/artistic.html>
+X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU_XS
+
 s/^  //mg for values %fatpacked;
 
 my $class = 'FatPacked::'.(0+\%fatpacked);
@@ -31413,10 +33017,6 @@ unshift @INC, bless \%fatpacked, $class;
 
 pureproxy - a Pure Perl HTTP proxy server
 
-=head1 SYNOPSIS
-
-  pureproxy --port=5000 --workers=10
-
 =cut
 
 no warnings;
@@ -31438,7 +33038,6 @@ use Plack::Builder;
 use Plack::App::Proxy;
 
 my $app = builder {
-    enable 'AccessLog';
     enable 'Proxy::Connect::IO';
     enable 'Proxy::Requests';
     Plack::App::Proxy->new(backend => 'HTTP::Tiny')->to_app;
@@ -31463,4 +33062,63 @@ my $runner = Plack::Runner->new(
 
 $runner->parse_options('--server-software', "PureProxy/$VERSION", @ARGV);
 
+if ($runner->{help}) {
+    require Pod::Usage;
+    Pod::Usage::pod2usage(-verbose => 1, -input => \*DATA);
+}
+
+my %options = @{$runner->{options}};
+
+if ($options{traffic_log}) {
+    $body_eol = $options{traffic_log_body_eol};
+    if ($options{traffic_log} ne '1') {
+        open my $logfh, ">>", $options{traffic_log}
+            or die "open($options{traffic_log}): $!";
+        $logfh->autoflush(1);
+        $app = builder { enable 'TrafficLog', logger => sub { $logfh->print( @_ ) }, body_eol => $body_eol; $app; };
+    } else {
+        $app = builder { enable 'TrafficLog', body_eol => $body_eol; $app; };
+    }
+}
+
+if (not exists $options{access_log}) {
+    $app = builder { enable 'AccessLog'; $app; };
+}
+
 $runner->run($app);
+
+__DATA__
+
+=head1 SYNOPSIS
+
+  pureproxy --port=5000 --workers=10
+
+=head1 DESCRIPTION
+
+This is pure-Perl proxy HTTP server which can be run on almost every Perl
+installation.
+
+=cut
+
+__END__
+
+=head1 SEE ALSO
+
+L<http://github.com/dex4er/PureProxy>.
+
+=head1 BUGS
+
+This tool has unstable features and can change in future.
+
+=head1 AUTHOR
+
+Piotr Roszatycki <dexter@cpan.org>
+
+=head1 LICENSE
+
+Copyright (c) 2014 Piotr Roszatycki <dexter@cpan.org>.
+
+This is free software; you can redistribute it and/or modify it under
+the same terms as perl itself.
+
+See L<http://dev.perl.org/licenses/artistic.html>
