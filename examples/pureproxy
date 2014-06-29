@@ -21,7 +21,7 @@ $fatpacked{"Apache/LogFormat/Compiler.pm"} = '#line '.(1+__LINE__).' "'.__FILE__
       TIME => 4,
   };
   
-  our $VERSION = '0.30';
+  our $VERSION = '0.32';
   
   # copy from Plack::Middleware::AccessLog
   our %formats = (
@@ -15317,20 +15317,25 @@ $fatpacked{"Plack/Handler/Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\
   use strict;
   use warnings;
   
-  our $VERSION = '0.0202';
+  our $VERSION = '0.0300';
   
   use base qw(Thrall::Server);
   
   use threads;
+  
+  use Config ();
+  use English '-no_match_vars';
+  use Fcntl ();
+  use File::Spec;
+  use POSIX ();
   use Plack::Util;
   
   use constant DEBUG => $ENV{PERL_THRALL_DEBUG};
   
   sub new {
-      my ($klass, %args) = @_;
+      my ($class, %args) = @_;
   
       # setup before instantiation
-      my $listen_sock;
       my $max_workers = 10;
       for (qw(max_workers workers)) {
           $max_workers = delete $args{$_}
@@ -15338,22 +15343,17 @@ $fatpacked{"Plack/Handler/Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\
       }
   
       # instantiate and set the variables
-      my $self = $klass->SUPER::new(%args);
-      if (threads->can('isthread')) {
-          # forks as threads emulation
-          $self->{is_multithread}  = Plack::Util::FALSE;
-          $self->{is_multiprocess} = Plack::Util::TRUE;
-      }
-      else {
-          # real threads
-          $self->{is_multithread}  = Plack::Util::TRUE;
-          $self->{is_multiprocess} = Plack::Util::FALSE;
-      };
-      $self->{listen_sock} = $listen_sock
-          if $listen_sock;
+      my $self = $class->SUPER::new(%args);
+  
+      $self->{is_multithread}  = Plack::Util::TRUE;
+      $self->{is_multiprocess} = Plack::Util::FALSE;
+  
       $self->{max_workers} = $max_workers;
   
-      $self->{main_thread} = threads->self;
+      $self->{main_thread} = threads->tid;
+      $self->{processes} = +{};
+  
+      $self->{_kill_stalled_processes_delay} = 10;
   
       $self;
   }
@@ -15361,24 +15361,22 @@ $fatpacked{"Plack/Handler/Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\
   sub run {
       my($self, $app) = @_;
   
+      $self->_daemonize();
+  
       # EV does not work with threads
       $ENV{PERL_ANYEVENT_MODEL} = 'Perl';
       $ENV{PERL_ANYEVENT_IO_MODEL} = 'Perl';
   
-      # Windows 7 and previous have bad SIGINT handling
-      my $sigint = 'INT';
-      if ($^O eq 'MSWin32') {
-          require Win32;
-          my @v = Win32::GetOSVersion();
-          if ($v[1]*1000 + $v[2] < 6_002) {
-              $sigint = 'NONE';
-          }
-      };
-  
+      warn "*** starting main thread ", threads->tid if DEBUG;
       $self->setup_listener();
+  
+      $self->_setup_privileges();
   
       # Threads don't like simple 'IGNORE'
       local $SIG{PIPE} = sub { 'IGNORE' };
+  
+      my $sigint = $self->{_sigint};
+      my $sigterm = $^O eq 'MSWin32' ? 'KILL' : 'TERM';
   
       if ($self->{max_workers} != 0) {
           if ($self->{thread_stack_size}) {
@@ -15416,6 +15414,8 @@ $fatpacked{"Plack/Handler/Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\
           foreach my $thr (threads->list) {
               $thr->detach;
           }
+          warn "*** stopping main thread ", threads->tid if DEBUG;
+          exit 0;
       } else {
           # run directly, mainly for debugging
           local $SIG{$sigint} = local $SIG{TERM} = sub {
@@ -15427,38 +15427,6 @@ $fatpacked{"Plack/Handler/Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\
               $self->accept_loop($app, $self->_calc_reqs_per_child());
               $self->_sleep($self->{spawn_interval});
           }
-      }
-  }
-  
-  sub _sleep {
-      my ($self, $t) = @_;
-      select undef, undef, undef, $t if $t;
-  }
-  
-  sub _create_thread {
-      my ($self, $app) = @_;
-      my $thr = threads->create( {context => 'void'},
-          sub {
-              my ($self, $app) = @_;
-              warn "*** thread ", threads->tid, " starting" if DEBUG;
-              eval {
-                  $self->accept_loop($app, $self->_calc_reqs_per_child());
-              };
-              warn $@ if $@;
-              warn "*** thread ", threads->tid, " ending" if DEBUG;
-          },
-          $self, $app
-      );
-  }
-  
-  sub _calc_reqs_per_child {
-      my $self = shift;
-      my $max = $self->{max_reqs_per_child};
-      if (my $min = $self->{min_reqs_per_child}) {
-          srand((rand() * 2 ** 30) ^ $$ ^ time);
-          return $max - int(($max - $min + 1) * rand);
-      } else {
-          return $max;
       }
   }
   
@@ -19945,14 +19913,14 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
   use strict;
   use warnings;
   
-  our $VERSION = '0.0300';
+  our $VERSION = '0.0400';
   
   
   use parent 'Plack::Middleware';
   
   use Plack::Util::Accessor qw(
       with_request with_response with_date with_body with_all_chunks eol body_eol logger
-      _counter _call_id
+      _counter _call_id _strftime
   );
   
   
@@ -19962,7 +19930,7 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
   use Plack::Response;
   
   use POSIX ();
-  use POSIX::strftime::GNU ();
+  use POSIX::strftime::Compiler ();
   use Scalar::Util ();
   
   
@@ -19978,18 +19946,11 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
       $self->body_eol(defined $self->eol ? $self->eol : ' ') unless defined $self->body_eol;
       $self->eol('|')         unless defined $self->eol;
   
+      $self->_strftime(POSIX::strftime::Compiler->new('%d/%b/%Y:%H:%M:%S %z'));
+  
       $self->_counter(0);
   };
   
-  
-  sub _strftime {
-      my ($self, $fmt, @time) = @_;
-      my $old_locale = POSIX::setlocale(&POSIX::LC_ALL);
-      POSIX::setlocale(&POSIX::LC_ALL, 'C');
-      my $out = POSIX::strftime::GNU::strftime($fmt, @time);
-      POSIX::setlocale(&POSIX::LC_ALL, $old_locale);
-      return $out;
-  };
   
   sub _log_message {
       my ($self, $type, $env, $status, $headers, $body) = @_;
@@ -20006,7 +19967,7 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
       $body =~ s/\015?\012/$body_eol/gs if defined $body_eol;
   
       my $date = $self->with_date
-          ? ('['. $self->_strftime('%d/%b/%Y:%H:%M:%S %z', localtime) . '] ')
+          ? ('['. $self->_strftime->to_string(localtime) . '] ')
           : '';
   
       $logger->( sprintf "%s[%s] [%s %s %s] [%s] %s%s%s%s%s%s\n",
@@ -24050,6 +24011,7 @@ $fatpacked{"Starlight/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<
       for (my $i = 0; $i < @$headers; $i += 2) {
           my $k = $headers->[$i];
           my $v = $headers->[$i + 1];
+          $v = '' if not defined $v;
           my $lck = lc $k;
           if ($lck eq 'connection') {
               $$use_keepalive_r = undef
@@ -24097,7 +24059,7 @@ $fatpacked{"Starlight/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<
   
       }
   
-      unshift @lines, "HTTP/1.1 $status_code @{[ HTTP::Status::status_message($status_code) ]}\015\012";
+      unshift @lines, "HTTP/1.1 $status_code @{[ HTTP::Status::status_message($status_code) || 'Unknown' ]}\015\012";
       push @lines, "\015\012";
   
       if (defined $body && ref $body eq 'ARRAY' && @$body == 1
@@ -24434,7 +24396,7 @@ $fatpacked{"Stream/Buffered.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<
   use Stream::Buffered::File;
   use Stream::Buffered::PerlIO;
   
-  our $VERSION = 0.02;
+  our $VERSION = 0.03;
   
   our $MaxMemoryBufferSize = 1024 * 1024;
   
@@ -24637,17 +24599,23 @@ $fatpacked{"Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'THRALL';
   
     $ plackup -s Thrall --port=80 [options] your-app.psgi
   
-    $ plackup -s Thrall --port=443 --ssl=1 --ssl-key-file=file.key --ssl-cert-file=file.crt [options] your-app.psgi
+    $ plackup -s Thrall --port=443 --ssl=1 --ssl-key-file=file.key
+                        --ssl-cert-file=file.crt [options] your-app.psgi
   
     $ plackup -s Thrall --port=80 --ipv6 [options] your-app.psgi
   
     $ plackup -s Thrall --socket=/tmp/thrall.sock [options] your-app.psgi
+  
+    $ starlight your-app.psgi
   
   =head1 DESCRIPTION
   
   Thrall is a standalone HTTP/1.1 server with keep-alive support. It uses
   threads instead pre-forking, so it works correctly on Windows. It is pure-Perl
   implementation which doesn't require any XS package.
+  
+  See L<plackup> and L<thrall> (lower case) for available command line
+  options.
   
   =for readme stop
   
@@ -24659,141 +24627,19 @@ $fatpacked{"Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'THRALL';
   use strict;
   use warnings;
   
-  our $VERSION = '0.0202';
+  our $VERSION = '0.0300';
   
   1;
   
   
   __END__
   
-  =head1 COMMAND LINE OPTIONS
-  
-  In addition to the options supported by L<plackup>, Thrall accepts following
-  options(s).
-  
-  =over
-  
-  =item --max-workers=#
-  
-  number of worker processes (default: 10)
-  
-  =item --timeout=#
-  
-  seconds until timeout (default: 300)
-  
-  =item --keepalive-timeout=#
-  
-  timeout for persistent connections (default: 2)
-  
-  =item --max-keepalive-reqs=#
-  
-  max. number of requests allowed per single persistent connection.  If set to
-  one, persistent connections are disabled (default: 1)
-  
-  =item --max-reqs-per-child=#
-  
-  max. number of requests to be handled before a worker process exits (default:
-  1000)
-  
-  =item --min-reqs-per-child=#
-  
-  if set, randomizes the number of requests handled by a single worker process
-  between the value and that supplied by C<--max-reqs-per-chlid> (default: none)
-  
-  =item --spawn-interval=#
-  
-  if set, worker processes will not be spawned more than once than every given
-  seconds.  Also, when SIGHUP is being received, no more than one worker
-  processes will be collected every given seconds.  This feature is useful for
-  doing a "slow-restart". (default: none)
-  
-  =item --main-thread-delay=#
-  
-  the Thrall does not use signals or semaphores and it requires a small delay in
-  main thread so it doesn't consume all CPU. (default: 0.1)
-  
-  =item --thread-stack-size=#
-  
-  sets a new default per-thread stack size. (default: none)
-  
-  =item --ssl=#
-  
-  enables SSL support. The L<IO::Socket::SSL> module is required. (default: 0)
-  
-  =item --ssl-key-file=#
-  
-  specifies the path to SSL key file. (default: none)
-  
-  =item --ssl-cert-file=#
-  
-  specifies the path to SSL certificate file. (default: none)
-  
-  =item --ipv6=#
-  
-  enables IPv6 support. The L<IO::Socket::IP> module is required. (default: 0)
-  
-  =item --socket=#
-  
-  enables UNIX socket support. The L<IO::Socket::UNIX> module is required. The
-  socket file have to be not yet created. The first character C<@> or C<\0> in
-  the socket file name means that abstract socket address will be created.
-  (default: none)
-  
-  =back
-  
-  =for readme continue
-  
-  =head1 NOTES
-  
-  Thrall was started as a fork of L<Starlet> server. It has almost the same code
-  as L<Starlet> and it was adapted to use threads instead fork().
-  
   =head1 SEE ALSO
   
+  L<thrall>,
+  L<Starlight>,
   L<Starlet>,
   L<Starman>
-  
-  =head1 LIMITATIONS
-  
-  See L<threads/"BUGS AND LIMITATIONS"> and L<perlthrtut/"Thread-Safety of
-  System Libraries"> to read about limitations for PSGI applications started
-  with Thrall and check if you encountered a known problem.
-  
-  Especially, PSGI applications should avoid: changing current working
-  directory, catching signals, starting new processes. Environment variables
-  might (Linux, Unix) or might not (Windows) be shared between threads.
-  
-  Thrall is very slow on first request for each thread. It is because spawning
-  new thread is slow in Perl itself. Thrall is very fast on another requests and
-  generally is faster than any implementation which uses fork.
-  
-  =head1 BUGS
-  
-  There is a problem with Perl threads implementation which occurs on Windows.
-  Some requests can fail with message:
-  
-    failed to set socket to nonblocking mode:An operation was attempted on
-    something that is not a socket.
-  
-  or
-  
-    Bad file descriptor at (eval 24) line 4.
-  
-  Cygwin version seems to be correct.
-  
-  This problem was introduced in Perl 5.16 and fixed in Perl 5.19.5.
-  
-  See L<https://rt.perl.org/rt3/Public/Bug/Display.html?id=119003> and
-  L<https://github.com/dex4er/Thrall/issues/5> for more information about this
-  issue.
-  
-  =head2 Reporting
-  
-  If you find the bug or want to implement new features, please report it at
-  L<https://github.com/dex4er/Thrall/issues>
-  
-  The code repository is available at
-  L<http://github.com/dex4er/Thrall>
   
   =head1 AUTHORS
   
@@ -24827,14 +24673,16 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
   use strict;
   use warnings;
   
-  our $VERSION = '0.0202';
+  our $VERSION = '0.0300';
   
   use Config;
-  use if ! $Config{useithreads}, 'forks';
   
+  use if ! $Config{useithreads}, 'forks';
   use threads;
   
-  use Carp ();
+  use English '-no_match_vars';
+  use Errno ();
+  use File::Spec;
   use Plack;
   use Plack::HTTPParser qw( parse_http_request );
   use IO::Socket::INET;
@@ -24843,17 +24691,22 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
   use List::Util qw(max sum);
   use Plack::Util;
   use Plack::TempBuffer;
-  use POSIX qw(EINTR EAGAIN EWOULDBLOCK);
   use Socket qw(IPPROTO_TCP TCP_NODELAY);
   
   use Try::Tiny;
-  use Time::HiRes qw(time);
+  
+  BEGIN { try { require Time::HiRes; Time::HiRes->import(qw(time)) } }
   
   use constant DEBUG            => $ENV{PERL_THRALL_DEBUG};
   use constant CHUNKSIZE        => 64 * 1024;
   use constant MAX_REQUEST_SIZE => 131072;
   
   use constant HAS_INET6        => eval { AF_INET6 && socket my $ipv6_socket, AF_INET6, SOCK_DGRAM, 0 };
+  
+  use constant EINTR            => exists &Errno::EINTR ? &Errno::EINTR : -1;
+  use constant EAGAIN           => exists &Errno::EAGAIN ? &Errno::EAGAIN : -1;
+  use constant EWOULDBLOCK      => exists &Errno::EWOULDBLOCK ? &Errno::EWOULDBLOCK : -1;
+  
   
   my $null_io = do { open my $io, "<", \""; $io }; #"
   
@@ -24875,6 +24728,13 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
           ipv6                 => $args{ipv6},
           ssl_key_file         => $args{ssl_key_file},
           ssl_cert_file        => $args{ssl_cert_file},
+          user                 => $args{user},
+          group                => $args{group},
+          umask                => $args{umask},
+          daemonize            => $args{daemonize},
+          pid                  => $args{pid},
+          error_log            => $args{error_log},
+          quiet                => $args{quiet} || $args{q} || $ENV{PLACK_QUIET},
           min_reqs_per_child   => (
               defined $args{min_reqs_per_child}
                   ? $args{min_reqs_per_child} : undef,
@@ -24896,12 +24756,22 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
           is_multiprocess      => Plack::Util::FALSE,
           _using_defer_accept  => undef,
           _unlink              => [],
+          _sigint              => 'INT',
       }, $class;
   
+      # Windows 7 and previous have bad SIGINT handling
+      if ($^O eq 'MSWin32') {
+          require Win32;
+          my @v = Win32::GetOSVersion();
+          if ($v[1]*1000 + $v[2] < 6_002) {
+              $self->{_sigint} = 'TERM';
+          }
+      };
+  
       if ($args{max_workers} && $args{max_workers} > 1) {
-          Carp::carp(
+          die(
               "Threading in $class is deprecated. Falling back to the single thread mode. ",
-              "If you need more workers, use Starman, Starlet or Thrall instead and run like `plackup -s Thrall`",
+              "If you need more workers, use Thrall instead and run like `plackup -s Thrall`",
           );
       }
   
@@ -24917,28 +24787,28 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
   sub prepare_socket_class {
       my($self, $args) = @_;
   
-      if ($self->{socket} and ($self->{ssl} or $self->{ipv6})) {
-          Carp::croak("UNIX socket and either SSL or IPv6 are not supported at the same time. Choose one.");
+      if ($self->{socket} and ($self->{port} or $self->{ipv6})) {
+          die "UNIX socket and ether IPv4 or IPv6 are not supported at the same time.\n";
       }
   
-      if ($self->{ssl} and $self->{ipv6}) {
-          Carp::croak("SSL and IPv6 are not supported at the same time (yet). Choose one.");
+      if ($self->{ssl} and ($self->{socket} or $self->{ipv6})) {
+          die "SSL and either UNIX socket or IPv6 are not supported at the same time.\n";
       }
   
       if ($self->{socket}) {
           try { require IO::Socket::UNIX; 1 }
-              or Carp::croak("UNIX socket suport requires IO::Socket::UNIX");
+              or die "UNIX socket suport requires IO::Socket::UNIX\n";
           $args->{Local} =~ s/^@/\0/; # abstract socket address
           return "IO::Socket::UNIX";
       } elsif ($self->{ssl}) {
           try { require IO::Socket::SSL; 1 }
-              or Carp::croak("SSL suport requires IO::Socket::SSL");
+              or die "SSL suport requires IO::Socket::SSL\n";
           $args->{SSL_key_file}  = $self->{ssl_key_file};
           $args->{SSL_cert_file} = $self->{ssl_cert_file};
           return "IO::Socket::SSL";
       } elsif ($self->{ipv6}) {
           try { require IO::Socket::IP; 1 }
-              or Carp::croak("IPv6 support requires IO::Socket::IP");
+              or die "IPv6 support requires IO::Socket::IP\n";
           $self->{host}      ||= '::';
           $args->{LocalAddr} ||= '::';
           return "IO::Socket::IP";
@@ -24961,10 +24831,15 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
           ReuseAddr => 1,
       );
   
+      my $proto = $self->{ssl} ? 'https' : 'http';
+      my $listening = $self->{socket} ? "socket $self->{socket}" : "port $self->{port}";
+  
       my $class = $self->prepare_socket_class(\%args);
       $self->{listen_sock} ||= $class->new(%args)
-          or die sprintf "failed to listen to %s: $!", $self->{socket}
-              ? "socket $self->{socket}" : "port $self->{port}";
+          or die "failed to listen to $listening: $!\n";
+  
+      print STDERR "Starting $self->{server_software} $proto server listening at $listening\n"
+          unless $self->{quiet};
   
       my $family = Socket::sockaddr_family(getsockname($self->{listen_sock}));
       $self->{_listen_sock_is_unix} = $family == AF_UNIX;
@@ -24977,10 +24852,10 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
       }
   
       if ($self->{_listen_sock_is_unix} && not $args{Local} =~ /^\0/) {
-          push @{$self->{_unlink}}, $args{Local};
+          $self->_add_to_unlink(File::Spec->rel2abs($args{Local}));
       }
   
-      $self->{server_ready}->({ %$self, proto => $self->{ssl} ? 'https' : 'http' });
+      $self->{server_ready}->({ %$self, proto => $proto });
   }
   
   sub accept_loop {
@@ -24990,6 +24865,16 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
   
       $self->{can_exit} = 1;
       my $is_keepalive = 0;
+      my $sigint = $self->{_sigint};
+      local $SIG{$sigint} = local $SIG{TERM} = sub {
+          my ($sig) = @_;
+          warn "*** SIG$sig received thread ", threads->tid if DEBUG;
+          exit 0 if $self->{can_exit};
+          $self->{term_received}++;
+          exit 0
+              if ($is_keepalive && $self->{can_exit}) || $self->{term_received} > 1;
+          # warn "server termination delayed while handling current HTTP request";
+      };
   
       # Threads don't like simple 'IGNORE'
       local $SIG{PIPE} = sub { 'IGNORE' };
@@ -24999,11 +24884,11 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
           if (my ($conn,$peer) = $self->{listen_sock}->accept) {
               $self->{_is_deferred_accept} = $self->{_using_defer_accept};
               $conn->blocking(0)
-                  or die "failed to set socket to nonblocking mode:$!";
+                  or die "failed to set socket to nonblocking mode:$!\n";
               my ($peerport, $peerhost, $peeraddr) = (0, undef, undef);
               if ($self->{_listen_sock_is_tcp}) {
                   $conn->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-                      or die "setsockopt(TCP_NODELAY) failed:$!";
+                      or die "setsockopt(TCP_NODELAY) failed:$!\n";
                   local $@;
                   if (HAS_INET6 && Socket::sockaddr_family(getsockname($conn)) == AF_INET6) {
                       ($peerport, $peerhost) = Socket::unpack_sockaddr_in6($peer);
@@ -25187,7 +25072,7 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
               $self->_handle_response($env->{SERVER_PROTOCOL}, $_[0], $conn, \$use_keepalive);
           });
       } else {
-          die "Bad response $res";
+          die "Bad response $res\n";
       }
       if ($self->{term_received}) {
           threads->exit;
@@ -25207,6 +25092,7 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
       for (my $i = 0; $i < @$headers; $i += 2) {
           my $k = $headers->[$i];
           my $v = $headers->[$i + 1];
+          $v = '' if not defined $v;
           my $lck = lc $k;
           if ($lck eq 'connection') {
               $$use_keepalive_r = undef
@@ -25254,11 +25140,11 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
   
       }
   
-      unshift @lines, "HTTP/1.1 $status_code @{[ HTTP::Status::status_message($status_code) ]}\015\012";
+      unshift @lines, "HTTP/1.1 $status_code @{[ HTTP::Status::status_message($status_code) || 'Unknown' ]}\015\012";
       push @lines, "\015\012";
   
       if (defined $body && ref $body eq 'ARRAY' && @$body == 1
-              && length $body->[0] < 8192) {
+              && defined $body->[0] && length $body->[0] < 8192) {
           # combine response header and small request body
           my $buf = $body->[0];
           if ($use_chunked ) {
@@ -25377,6 +25263,196 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
           $off += $ret;
       }
       return length $buf;
+  }
+  
+  sub _add_to_unlink {
+      my ($self, $filename) = @_;
+      push @{$self->{_unlink}}, File::Spec->rel2abs($filename);
+  }
+  
+  sub _daemonize {
+      my $self = shift;
+  
+      if ($^O eq 'MSWin32') {
+          foreach my $arg (qw(daemonize pid)) {
+              die "$arg parameter is not supported on this platform ($^O)\n" if $self->{$arg};
+          }
+      }
+  
+      my ($pidfh, $pidfile);
+      if ($self->{pid}) {
+          $pidfile = File::Spec->rel2abs($self->{pid});
+          if (defined *Fcntl::O_EXCL{CODE}) {
+              sysopen $pidfh, $pidfile, Fcntl::O_WRONLY|Fcntl::O_CREAT|Fcntl::O_EXCL
+                                                 or die "Cannot open pid file: $self->{pid}: $!\n";
+          } else {
+              open $pidfh, '>', $pidfile         or die "Cannot open pid file: $self->{pid}: $!\n";
+          }
+      }
+  
+      if (defined $self->{error_log}) {
+          open STDERR, '>>', $self->{error_log}  or die "Cannot open error log file: $self->{error_log}: $!\n";
+      }
+  
+      if ($self->{daemonize}) {
+  
+          chdir File::Spec->rootdir              or die "Cannot chdir to root directory: $!\n";
+  
+          open my $devnull,  '+>', File::Spec->devnull or die "Cannot open null device: $!\n";
+  
+          open STDIN, '>&', $devnull             or die "Cannot dup null device: $!\n";
+          open STDOUT, '>&', $devnull            or die "Cannot dup null device: $!\n";
+  
+          defined(my $pid = fork)                or die "Cannot fork: $!\n";
+          if ($pid) {
+              if ($self->{pid} and $pid) {
+                  print $pidfh "$pid\n"          or die "Cannot write pidfile $self->{pid}: $!\n";
+                  close $pidfh;
+                  open STDERR, '>&', $devnull    or die "Cannot dup null device: $!\n";
+              }
+              exit;
+          }
+  
+          close $pidfh if $pidfh;
+  
+          if ($Config::Config{d_setsid}) {
+              POSIX::setsid()                    or die "Cannot setsid: $!\n";
+          }
+  
+          if (not defined $self->{error_log}) {
+              open STDERR, '>&', $devnull        or die "Cannot dup null device: $!\n";
+          }
+      }
+  
+      if ($pidfile) {
+          $self->_add_to_unlink($pidfile);
+      }
+  
+      return;
+  }
+  
+  sub _setup_privileges {
+      my ($self) = @_;
+  
+      if (defined $self->{group}) {
+          if (not $Config::Config{d_setegid}) {
+              die "group parameter is not supported on this platform ($^O)\n";
+          }
+          if ($self->_get_gid($self->{group}) ne $EGID) {
+              warn "*** setting group to \"$self->{group}\"" if DEBUG;
+              $self->_set_gid($self->{group});
+          }
+      }
+  
+      if (defined $self->{user}) {
+          if (not $Config::Config{d_seteuid}) {
+              die "user parameter is not supported on this platform ($^O)\n";
+          }
+          if ($self->_get_uid($self->{user}) ne $EUID) {
+              warn "*** setting user to \"$self->{user}\"" if DEBUG;
+              $self->_set_uid($self->{user});
+          }
+      }
+  
+      if (defined $self->{umask}) {
+          if (not $Config::Config{d_umask}) {
+              die "umask parameter is not supported on this platform ($^O)\n";
+          }
+          warn "*** setting umask to \"$self->{umask}\"" if DEBUG;
+          umask(oct($self->{umask}));
+      }
+  
+      return;
+  }
+  
+  # Taken from Net::Server::Daemonize
+  sub _get_uid {
+      my ($self, $user) = @_;
+      my $uid  = ($user =~ /^(\d+)$/) ? $1 : getpwnam($user);
+      die "No such user \"$user\"\n" unless defined $uid;
+      return $uid;
+  }
+  
+  # Taken from Net::Server::Daemonize
+  sub _get_gid {
+      my ($self, @groups) = @_;
+      my @gid;
+  
+      foreach my $group ( split( /[, ]+/, join(" ",@groups) ) ){
+          if( $group =~ /^\d+$/ ){
+              push @gid, $group;
+          }else{
+              my $id = getgrnam($group);
+              die "No such group \"$group\"\n" unless defined $id;
+              push @gid, $id;
+          }
+      }
+  
+      die "No group found in arguments.\n" unless @gid;
+      return join(" ",$gid[0],@gid);
+  }
+  
+  # Taken from Net::Server::Daemonize
+  sub _set_uid {
+      my ($self, $user) = @_;
+      my $uid = $self->_get_uid($user);
+  
+      eval { POSIX::setuid($uid) };
+      if ($UID != $uid || $EUID != $uid) { # check $> also (rt #21262)
+          $UID = $EUID = $uid; # try again - needed by some 5.8.0 linux systems (rt #13450)
+          if ($UID != $uid) {
+              die "Couldn't become uid \"$uid\": $!\n";
+          }
+      }
+  
+      return 1;
+  }
+  
+  # Taken from Net::Server::Daemonize
+  sub _set_gid {
+      my ($self, @groups) = @_;
+      my $gids = $self->_get_gid(@groups);
+      my $gid  = (split /\s+/, $gids)[0];
+      eval { $) = $gids }; # store all the gids - this is really sort of optional
+  
+      eval { POSIX::setgid($gid) };
+      if (! grep {$gid == $_} split /\s+/, $GID) { # look for any valid id in the list
+          die "Couldn't become gid \"$gid\": $!\n";
+      }
+  
+      return 1;
+  }
+  
+  sub _sleep {
+      my ($self, $t) = @_;
+      select undef, undef, undef, $t if $t;
+  }
+  
+  sub _create_thread {
+      my ($self, $app) = @_;
+      my $thr = threads->create( {context => 'void'},
+          sub {
+              my ($self, $app) = @_;
+              warn "*** thread ", threads->tid, " starting" if DEBUG;
+              eval {
+                  $self->accept_loop($app, $self->_calc_reqs_per_child());
+              };
+              warn $@ if $@;
+              warn "*** thread ", threads->tid, " ending" if DEBUG;
+          },
+          $self, $app
+      );
+  }
+  
+  sub _calc_reqs_per_child {
+      my $self = shift;
+      my $max = $self->{max_reqs_per_child};
+      if (my $min = $self->{min_reqs_per_child}) {
+          srand((rand() * 2 ** 30) ^ $$ ^ time);
+          return $max - int(($max - $min + 1) * rand);
+      } else {
+          return $max;
+      }
   }
   
   sub DESTROY {
@@ -32047,936 +32123,6 @@ $fatpacked{"parent.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'PARENT';
   
   =cut
 PARENT
-
-$fatpacked{"x86_64-linux-thread-multi/POSIX/strftime/GNU.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU';
-  #!/usr/bin/perl -c
-  
-  package POSIX::strftime::GNU;
-  
-  =head1 NAME
-  
-  POSIX::strftime::GNU - strftime with GNU extensions
-  
-  =head1 SYNOPSIS
-  
-    use POSIX::strftime::GNU;
-    use POSIX 'strftime';
-    print POSIX::strftime('%a, %d %b %Y %T %z', localtime);
-  
-  command line:
-  
-    C:\> set PERL_ANYEVENT_LOG=filter=debug
-    C:\> perl -MPOSIX::strftime::GNU -MAnyEvent -e "AE::cv->send"
-  
-  =head1 DESCRIPTION
-  
-  This is a wrapper for L<POSIX::strftime|POSIX/strftime> which implements more
-  character sequences compatible with GNU systems.
-  
-  The module is 100% compatible with format of date(1) command from GNU
-  coreutils package.
-  
-  It can be helpful if you run some software on operating system where these
-  extensions, especially C<%z> sequence, are not supported, i.e. on Microsoft
-  Windows. On such system some software can work incorrectly, i.e. logging for
-  L<Plack> and L<AnyEvent> modules might be broken.
-  
-  Even GNU C Library's strftime(3) function does not provide 100% compatibility
-  with date(1) command so this module can be useful also on Linux.
-  
-  The XS module is used if compiler is available and can module can be loaded.
-  The XS is mandatory if C<PERL_POSIX_STRFTIME_GNU_XS> environment variable is
-  true.
-  
-  The PP module is used when XS module can not be loaded or
-  C<PERL_POSIX_STRFTIME_GNU_PP> environment variable is true.
-  
-  None of these modules are loaded if both C<PERL_POSIX_STRFTIME_GNU_PP> and
-  C<PERL_POSIX_STRFTIME_GNU_XS> environment variables are defined and false.
-  
-  =for readme stop
-  
-  =cut
-  
-  
-  use 5.006;
-  use strict;
-  use warnings;
-  
-  our $VERSION = '0.0304';
-  
-  use Carp ();
-  use POSIX ();
-  
-  =head1 FUNCTIONS
-  
-  =head2 strftime
-  
-    $str = strftime($format, @time)
-  
-  This is replacement for L<POSIX::strftime|POSIX/strftime> function.
-  
-  The nanoseconds can be given as a fraction of seconds.
-  
-    use POSIX::strftime::GNU;
-    use Time::HiRes qw(gettimeofday);
-    my ($t, $nsec) = gettimeofday;
-    my @t = localtime $t;
-    $t[0] += $nsec / 10e5;
-    print strftime('%N', @t);
-  
-  =cut
-  
-  my ($xs_loaded, $pp_loaded);
-  
-  my $xs_env = $ENV{PERL_POSIX_STRFTIME_GNU_XS};
-  my $pp_env = $ENV{PERL_POSIX_STRFTIME_GNU_PP};
-  
-  if (
-       (not defined $xs_env or defined $xs_env and $xs_env )
-          and
-       (not defined $pp_env or defined $pp_env and not $pp_env )
-  ) {
-      $xs_loaded = eval {
-          require POSIX::strftime::GNU::XS;
-          no warnings 'once';
-          *strftime = *POSIX::strftime::GNU::XS::strftime;
-          1;
-      };
-      die $@ if $@ and $ENV{PERL_POSIX_STRFTIME_GNU_XS};
-  };
-  
-  if (not $xs_loaded and (not defined $pp_env or defined $pp_env and $pp_env)) {
-      require POSIX::strftime::GNU::PP;
-      no warnings 'once';
-      *strftime = *POSIX::strftime::GNU::PP::strftime;
-      $pp_loaded = 1;
-  };
-  
-  sub import {
-      my ($class) = @_;
-      *POSIX::strftime = *strftime if $xs_loaded or $pp_loaded;
-      return 1;
-  };
-  
-  1;
-  
-  
-  =head1 FORMAT
-  
-  The format argument is composed of zero or more conversion specifications.
-  Each conversion specification is composed of a C<%> (percent) character
-  followed by one or two conversion characters which specify the replacement
-  required.
-  
-  There are some extensions of ANSI C (unmarked): those given in the Single UNIX
-  Specification (marked SU), those given in Olson's timezone package (marked
-  TZ), and those given in glibc (marked GNU).
-  
-  The following conversion specifications are supported:
-  
-  =over
-  
-  =item C<%a>
-  
-  The abbreviated weekday name according to the current locale.
-  
-  =item C<%A>
-  
-  The full weekday name according to the current locale.
-  
-  =item C<%b>
-  
-  The abbreviated month name according to the current locale.
-  
-  =item C<%B>
-  
-  The full month name according to the current locale.
-  
-  =item C<%c>
-  
-  The preferred date and time representation for the current locale.
-  
-  =item C<%C>
-  
-  The century number (year/100) as a 2-digit integer. (SU)
-  
-  =item C<%d>
-  
-  The day of the month as a decimal number (range 01 to 31).
-  
-  =item C<%D>
-  
-  Equivalent to C<%m/%d/%y>. (for Americans only: Americans should note that in
-  other countries C<%d/%m/%y> is rather common. This means that in international
-  context this format is ambiguous and should not be used.) (SU)
-  
-  =item C<%e>
-  
-  Like C<%d>, the day of the month as a decimal number, but a leading zero is
-  replaced by a space. (SU)
-  
-  =item C<%E>
-  
-  Modifier: use alternative format, see below. (SU)
-  
-  =item C<%F>
-  
-  Equivalent to C<%Y-%m-%d> (the ISO 8601 date format). (C99)
-  
-  =item C<%G>
-  
-  The ISO 8601 week-based year (see NOTES) with century as a decimal number. The
-  4-digit year corresponding to the ISO week number (see C<%V>). This has the
-  same format and value as %Y, except that if the ISO week number belongs to the
-  previous or next year, that year is used instead. (TZ)
-  
-  =item C<%g>
-  
-  Like C<%G>, but without century, that is, with a 2-digit year (00-99). (TZ)
-  
-  =item C<%h>
-  
-  Equivalent to C<%b>. (SU)
-  
-  =item C<%H>
-  
-  The hour as a decimal number using a 24-hour clock (range 00 to 23).
-  
-  =item C<%I>
-  
-  The hour as a decimal number using a 12-hour clock (range 01 to 12).
-  
-  =item C<%j>
-  
-  The day of the year as a decimal number (range 001 to 366).
-  
-  =item C<%k>
-  
-  The hour (24-hour clock) as a decimal number (range 0 to 23); single digits
-  are preceded by a blank. (See also C<%H>.) (TZ)
-  
-  =item C<%l>
-  
-  The hour (12-hour clock) as a decimal number (range 1 to 12); single digits
-  are preceded by a blank. (See also C<%I>.) (TZ)
-  
-  =item C<%m>
-  
-  The month as a decimal number (range 01 to 12).
-  
-  =item C<%M>
-  
-  The minute as a decimal number (range 00 to 59).
-  
-  =item C<%n>
-  
-  A newline character. (SU)
-  
-  =item C<%N>
-  
-  Nanoseconds (range 000000000 to 999999999). It is a non-POSIX extension and
-  outputs a nanoseconds if there is floating seconds argument.
-  
-  =item C<%O>
-  
-  Modifier: use alternative format, see below. (SU)
-  
-  =item C<%p>
-  
-  Either "AM" or "PM" according to the given time value, or the corresponding
-  strings for the current locale. Noon is treated as "PM" and midnight as "AM".
-  
-  =item C<%P>
-  
-  Like C<%p> but in lowercase: "am" or "pm" or a corresponding string for the
-  current locale. (GNU)
-  
-  =item C<%r>
-  
-  The time in a.m. or p.m. notation. In the POSIX locale this is equivalent to
-  C<%I:%M:%S %p>. (SU)
-  
-  =item C<%R>
-  
-  The time in 24-hour notation (%H:%M). (SU) For a version including the
-  seconds, see C<%T> below.
-  
-  =item C<%s>
-  
-  The number of seconds since the Epoch, 1970-01-01 00:00:00 +0000 (UTC). (TZ)
-  
-  =item C<%S>
-  
-  The second as a decimal number (range 00 to 60). (The range is up to 60 to
-  allow for occasional leap seconds.)
-  
-  =item C<%t>
-  
-  A tab character. (SU)
-  
-  =item C<%T>
-  
-  The time in 24-hour notation (C<%H:%M:%S>). (SU)
-  
-  =item C<%u>
-  
-  The day of the week as a decimal, range 1 to 7, Monday being 1. See also
-  C<%w>. (SU)
-  
-  =item C<%U>
-  
-  The week number of the current year as a decimal number, range 00 to 53,
-  starting with the first Sunday as the first day of week 01. See also C<%V> and
-  C<%W>.
-  
-  =item C<%V>
-  
-  The ISO 8601 week number (see NOTES) of the current year as a decimal number,
-  range 01 to 53, where week 1 is the first week that has at least 4 days in the
-  new year. See also C<%U> and C<%W>. (SU)
-  
-  =item C<%w>
-  
-  The day of the week as a decimal, range 0 to 6, Sunday being 0. See also
-  C<%u>.
-  
-  =item C<%W>
-  
-  The week number of the current year as a decimal number, range 00 to 53,
-  starting with the first Monday as the first day of week 01.
-  
-  =item C<%x>
-  
-  The preferred date representation for the current locale without the time.
-  
-  =item C<%X>
-  
-  The preferred time representation for the current locale without the date.
-  
-  =item C<%y>
-  
-  The year as a decimal number without a century (range 00 to 99).
-  
-  =item C<%Y>
-  
-  The year as a decimal number including the century.
-  
-  =item C<%z>
-  
-  The C<+hhmm> or C<-hhmm> numeric timezone (that is, the hour and minute offset
-  from UTC). (SU)
-  
-  =item C<%Z>
-  
-  The timezone or name or abbreviation.
-  
-  =item C<%+>
-  
-  The date and time in date(1) format. (TZ) (Not supported in glibc2.)
-  
-  =item C<%%>
-  
-  A literal C<%> character.
-  
-  =back
-  
-  Some conversion specifications can be modified by preceding the conversion
-  specifier character by the C<E> or C<O> modifier to indicate that an
-  alternative format should be used. If the alternative format or specification
-  does not exist for the current locale, the behavior will be as if the
-  unmodified conversion specification were used. (SU) The Single UNIX
-  Specification mentions C<%Ec>, C<%EC>, C<%Ex>, C<%EX>, C<%Ey>, C<%EY>, C<%Od>,
-  C<%Oe>, C<%OH>, C<%OI>, C<%Om>, C<%OM>, C<%OS>, C<%Ou>, C<%OU>, C<%OV>,
-  C<%Ow>, C<%OW>, C<%Oy>, where the effect of the C<O> modifier is to use
-  alternative numeric symbols (say, roman numerals), and that of the C<E>
-  modifier is to use a locale-dependent alternative representation.
-  
-  C<%G>, C<%g>, and C<%V> yield values calculated from the week-based year
-  defined by the ISO 8601 standard. In this system, weeks start on a Monday, and
-  are numbered from 01, for the first week, up to 52 or 53, for the last week.
-  Week 1 is the first week where four or more days fall within the new year (or,
-  synonymously, week 01 is: the first week of the year that contains a Thursday;
-  or, the week that has 4 January in it). When three of fewer days of the first
-  calendar week of the new year fall within that year, then the ISO 8601
-  week-based system counts those days as part of week 53 of the preceding year.
-  For example, 1 January 2010 is a Friday, meaning that just three days of that
-  calendar week fall in 2010. Thus, the ISO 8601 week- based system considers
-  these days to be part of week 53 (C<%V>) of the year 2009 (C<%G>) ; week 01 of
-  ISO 8601 year 2010 starts on Monday, 4 January 2010.
-  
-  Glibc provides some extensions for conversion specifications. (These
-  extensions are not specified in POSIX.1-2001, but a few other systems provide
-  similar features.) Between the C<%> character and the conversion specifier
-  character, an optional flag and field width may be specified. (These precede
-  the C<E> or C<O> modifiers, if present.)
-  
-  The following flag characters are permitted:
-  
-  =over
-  
-  =item C<_>
-  
-  (underscore) Pad a numeric result string with spaces.
-  
-  =item C<->
-  
-  (dash) Do not pad a numeric result string.
-  
-  =item C<0>
-  
-  Pad a numeric result string with zeros even if the conversion specifier
-  character uses space-padding by default.
-  
-  =item C<^>
-  
-  Convert alphabetic characters in result string to upper case.
-  
-  =item C<#>
-  
-  Swap the case of the result string. (This flag only works with certain
-  conversion specifier characters, and of these, it is only really useful with
-  C<%Z>.)
-  
-  =back
-  
-  =for readme continue
-  
-  =head1 INSTALLING
-  
-  =head2 Cygwin
-  
-  This module requires C<libcrypt-devel> package.
-  
-  =head1 BUGS
-  
-  Timezone name is guessed with several heuristics so it can differ from
-  timezone name returned by date(1) command.
-  
-  If you find the bug or want to implement new features, please report it at
-  L<https://github.com/dex4er/perl-POSIX-strftime-GNU/issues>
-  
-  The code repository is available at
-  L<http://github.com/dex4er/perl-POSIX-strftime-GNU>
-  
-  =head1 AUTHOR
-  
-  Piotr Roszatycki <dexter@cpan.org>
-  
-  =head1 LICENSE
-  
-  Copyright (c) 2012-2014 Piotr Roszatycki <dexter@cpan.org>.
-  
-  Format specification is based on strftime(3) manual page which is a part of
-  the Linux man-pages project.
-  
-  This is free software; you can redistribute it and/or modify it under
-  the same terms as perl itself.
-  
-  See L<http://dev.perl.org/licenses/artistic.html>
-X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU
-
-$fatpacked{"x86_64-linux-thread-multi/POSIX/strftime/GNU/PP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU_PP';
-  #!/usr/bin/perl -c
-  
-  package POSIX::strftime::GNU::PP;
-  
-  =head1 NAME
-  
-  POSIX::strftime::GNU::PP - Pure-Perl extension for POSIX::strftime::GNU
-  
-  =head1 SYNOPSIS
-  
-    $ export PERL_POSIX_STRFTIME_GNU_PP=1
-  
-  =head1 DESCRIPTION
-  
-  This is PP extension for POSIX::strftime which implements more character
-  sequences compatible with GNU systems.
-  
-  =cut
-  
-  
-  use 5.006;
-  use strict;
-  use warnings;
-  
-  our $VERSION = '0.0304';
-  
-  use Carp ();
-  use POSIX ();
-  use Time::Local ();
-  
-  use constant SEC   => 0;
-  use constant MIN   => 1;
-  use constant HOUR  => 2;
-  use constant MDAY  => 3;
-  use constant MON   => 4;
-  use constant YEAR  => 5;
-  use constant WDAY  => 6;
-  use constant YDAY  => 7;
-  use constant ISDST => 8;
-  
-  # $str = tzoffset (@time)
-  #
-  # Returns the C<+hhmm> or C<-hhmm> numeric timezone (the hour and minute offset
-  # from UTC).
-  
-  my $tzoffset = sub {
-      my ($colons, @t) = @_;
-  
-      # Normalize @t array, we need seconds without frac
-      $t[SEC] = int $t[SEC];
-  
-      my $diff = (exists $ENV{TZ} and $ENV{TZ} eq 'GMT')
-               ? 0
-               : Time::Local::timegm(@t) - Time::Local::timelocal(@t);
-  
-      my $h = $diff / 60 / 60;
-      my $m = $diff / 60 % 60;
-      my $s = $diff % 60;
-  
-      my $fmt = do {
-          if ($colons == 0) {
-              '%+03d%02u';
-          }
-          elsif ($colons == 1) {
-              '%+03d:%02u';
-          }
-          elsif ($colons == 2) {
-              '%+03d:%02u:%02u';
-          }
-          elsif ($colons == 3) {
-              $s ? '%+03d:%02u:%02u' : $m ? '%+03d:%02u' : '%+03d';
-          }
-          else {
-              '%%' . ':' x $colons . 'z';
-          };
-      };
-  
-      return sprintf $fmt, $h, $m, $s;
-  };
-  
-  my @offset2zone = qw(
-      -11       0 SST     -11       0 SST
-      -10       0 HAST    -09       1 HADT
-      -10       0 HST     -10       0 HST
-      -09:30    0 MART    -09:30    0 MART
-      -09       0 AKST    -08       1 AKDT
-      -09       0 GAMT    -09       0 GAMT
-      -08       0 PST     -07       1 PDT
-      -08       0 PST     -08       0 PST
-      -07       0 MST     -06       1 MDT
-      -07       0 MST     -07       0 MST
-      -06       0 CST     -05       1 CDT
-      -06       0 GALT    -06       0 GALT
-      -05       0 ECT     -05       0 ECT
-      -05       0 EST     -04       1 EDT
-      -05       1 EASST   -06       0 EAST
-      -04:30    0 VET     -04:30    0 VET
-      -04       0 AMT     -04       0 AMT
-      -04       0 AST     -03       1 ADT
-      -03:30    0 NST     -02:30    1 NDT
-      -03       0 ART     -03       0 ART
-      -03       0 PMST    -02       1 PMDT
-      -03       1 AMST    -04       0 AMT
-      -03       1 WARST   -03       1 WARST
-      -02       0 FNT     -02       0 FNT
-      -02       1 UYST    -03       0 UYT
-      -01       0 AZOT    +00       1 AZOST
-      -01       0 CVT     -01       0 CVT
-      +00       0 GMT     +00       0 GMT
-      +00       0 WET     +01       1 WEST
-      +01       0 CET     +02       1 CEST
-      +01       0 WAT     +01       0 WAT
-      +02       0 EET     +02       0 EET
-      +02       0 IST     +03       1 IDT
-      +02       1 WAST    +01       0 WAT
-      +03       0 FET     +03       0 FET
-      +03:07:04 0 zzz     +03:07:04 0 zzz
-      +03:30    0 IRST    +04:30    1 IRDT
-      +04       0 AZT     +05       1 AZST
-      +04       0 GST     +04       0 GST
-      +04:30    0 AFT     +04:30    0 AFT
-      +05       0 DAVT    +07       0 DAVT
-      +05       0 MVT     +05       0 MVT
-      +05:30    0 IST     +05:30    0 IST
-      +05:45    0 NPT     +05:45    0 NPT
-      +06       0 BDT     +06       0 BDT
-      +06:30    0 CCT     +06:30    0 CCT
-      +07       0 ICT     +07       0 ICT
-      +08       0 HKT     +08       0 HKT
-      +08:45    0 CWST    +08:45    0 CWST
-      +09       0 JST     +09       0 JST
-      +09:30    0 CST     +09:30    0 CST
-      +10       0 PGT     +10       0 PGT
-      +10:30    1 CST     +09:30    0 CST
-      +11       0 CAST    +08       0 WST
-      +11       0 NCT     +11       0 NCT
-      +11       1 EST     +10       0 EST
-      +11       1 LHST    +10:30    0 LHST
-      +11:30    0 NFT     +11:30    0 NFT
-      +12       0 FJT     +12       0 FJT
-      +13       0 TKT     +13       0 TKT
-      +13       1 NZDT    +12       0 NZST
-      +13:45    1 CHADT   +12:45    0 CHAST
-      +14       0 LINT    +14       0 LINT
-      +14       1 WSDT    +13       0 WST
-  );
-  
-  # $str = tzname (@time)
-  #
-  # Returns the abbreviation of the time zone (e.g. "UTC" or "CEST").
-  
-  my $tzname = sub {
-      my @t = @_;
-  
-      return 'GMT' if exists $ENV{TZ} and $ENV{TZ} eq 'GMT';
-  
-      my $diff = $tzoffset->(3, @t);
-  
-      my @t1 = my @t2 = @t;
-      @t1[MDAY,MON] = (1, 1);  # winter
-      @t2[MDAY,MON] = (1, 7);  # summer
-  
-      my $diff1 = $tzoffset->(3, @t1);
-      my $diff2 = $tzoffset->(3, @t2);
-  
-      for (my $i=0; $i < @offset2zone; $i += 6) {
-          next unless $offset2zone[$i] eq $diff1 and $offset2zone[$i+3] eq $diff2;
-          return $diff2 eq $diff ? $offset2zone[$i+5] : $offset2zone[$i+2];
-      }
-  
-      if ($diff =~ /^([+-])(\d\d)$/) {
-          return sprintf 'GMT%s%d', $1 eq '-' ? '+' : '-', $2;
-      };
-  
-      return 'Etc';
-  };
-  
-  use constant ISO_WEEK_START_WDAY => 1;  # Monday
-  use constant ISO_WEEK1_WDAY      => 4;  # Thursday
-  use constant YDAY_MINIMUM        => -366;
-  use constant TM_YEAR_BASE        => 1900;
-  
-  # ($days, $year_adjust) = isodaysnum (@time)
-  #
-  # Returns the number of the year's day based on ISO-8601 standard and year
-  # adjust value.
-  
-  my $isodaysnum = sub {
-      my @t = @_;
-  
-      my $isleap = sub {
-          my ($year) = @_;
-          return (($year) % 4 == 0 && (($year) % 100 != 0 || ($year) % 400 == 0));
-      };
-  
-      my $iso_week_days = sub {
-          my ($yday, $wday) = @_;
-  
-          # Add enough to the first operand of % to make it nonnegative.
-          my $big_enough_multiple_of_7 = (int(- YDAY_MINIMUM / 7) + 2) * 7;
-          return ($yday
-                  - ($yday - $wday + ISO_WEEK1_WDAY + $big_enough_multiple_of_7) % 7
-                  + ISO_WEEK1_WDAY - ISO_WEEK_START_WDAY);
-      };
-  
-      # Normalize @t array, we need WDAY
-      $t[SEC] = int $t[SEC];
-      @t = gmtime Time::Local::timegm(@t);
-  
-      # YEAR is a leap year if and only if (tp->tm_year + TM_YEAR_BASE)
-      # is a leap year, except that YEAR and YEAR - 1 both work
-      # correctly even when (tp->tm_year + TM_YEAR_BASE) would
-      # overflow.
-      my $year = ($t[YEAR] + ($t[YEAR] < 0 ? TM_YEAR_BASE % 400 : TM_YEAR_BASE % 400 - 400));
-      my $year_adjust = 0;
-      my $days = $iso_week_days->($t[YDAY], $t[WDAY]);
-  
-      if ($days < 0) {
-          # This ISO week belongs to the previous year.
-          $year_adjust = -1;
-          $days = $iso_week_days->($t[YDAY] + (365 + $isleap->($year - 1)), $t[WDAY]);
-      }
-      else {
-          my $d = $iso_week_days->($t[YDAY] - (365 + $isleap->($year)), $t[WDAY]);
-          if ($d >= 0) {
-              # This ISO week belongs to the next year.  */
-              $year_adjust = 1;
-              $days = $d;
-          };
-      };
-  
-      return ($days, $year_adjust);
-  };
-  
-  # $num = isoyearnum (@time)
-  #
-  # Returns the number of the year based on ISO-8601 standard. See
-  # L<http://en.wikipedia.org/wiki/ISO_8601> for details.
-  
-  my $isoyearnum = sub {
-      my @t = @_;
-      my ($days, $year_adjust) = $isodaysnum->(@t);
-      return sprintf '%04d', $t[YEAR] + TM_YEAR_BASE + $year_adjust;
-  };
-  
-  # $num = isoweeknum (@time)
-  #
-  # Returns the number of the week based on ISO-8601 standard. See
-  # L<http://en.wikipedia.org/wiki/ISO_8601> for details.
-  
-  my $isoweeknum = sub {
-      my @t = @_;
-      my ($days, $year_adjust) = $isodaysnum->(@t);
-      return sprintf '%02d', int($days / 7) + 1;
-  };
-  
-  
-  =head1 FUNCTIONS
-  
-  =head2 strftime_orig
-  
-    $str = strftime_orig (@time)
-  
-  This is original L<POSIX::strftime|POSIX/strftime> function.
-  
-  =cut
-  
-  *strftime_orig = *POSIX::strftime;
-  
-  my %format = (
-      C => sub { 19 + int $_[YEAR] / 100 },
-      D => sub { '%m/%d/%y' },
-      e => sub { sprintf '%2d', $_[MDAY] },
-      F => sub { '%Y-%m-%d' },
-      G => $isoyearnum,
-      g => sub { sprintf '%02d', $isoyearnum->(@_) % 100 },
-      h => sub { '%b' },
-      k => sub { sprintf '%2d', $_[HOUR] },
-      l => sub { sprintf '%2d', $_[HOUR] % 12 + ($_[HOUR] % 12 == 0 ? 12 : 0) },
-      n => sub { "\n" },
-      N => sub { substr sprintf('%.9f', $_[SEC] - int $_[SEC]), 2 },
-      P => sub { lc strftime_orig('%p', @_) },
-      r => sub { '%I:%M:%S %p' },
-      R => sub { '%H:%M' },
-      s => sub { int Time::Local::timegm(@_) },
-      t => sub { "\t" },
-      T => sub { '%H:%M:%S' },
-      u => sub { my $dw = strftime_orig('%w', @_); $dw += ($dw == 0 ? 7 : 0); $dw },
-      V => $isoweeknum,
-      z => $tzoffset,
-      Z => $tzname,
-      '%' => sub { '%%' },
-  );
-  
-  my $formats = join '', sort keys %format;
-  
-  
-  =head2 strftime
-  
-    $str = strftime($format, @time)
-  
-  This is replacement for L<POSIX::strftime|POSIX/strftime> function.
-  
-  The non-POSIX feature is that seconds can be float number.
-  
-  =cut
-  
-  sub strftime {
-      my ($fmt, @t) = @_;
-  
-      Carp::croak 'Usage: POSIX::strftime::GNU::PP::strftime(fmt, sec, min, hour, mday, mon, year, wday = -1, yday = -1, isdst = -1)'
-          unless @t >= 6 and @t <= 9;
-  
-      my $strftime_modifier = sub {
-          my ($prefix, $modifier, $format, @t) = @_;
-          my $suffix = '';
-  
-          no warnings 'uninitialized';
-          my $str = strftime("%$format", @t);
-  
-          for (;;) {
-              if ($modifier eq '_' and $suffix !~ /0/ or $modifier eq '-' and $suffix !~ /0/ and $format =~ /[aAbBDFhnpPrRtTxXZ%]$/) {
-                  $str =~ s/^([+-])(0+)(\d:.*?|\d$)/' ' x length($2) . $1 . $3/ge;
-                  $str =~ s/^(0+)(.+?)$/' ' x length($1) . $2/ge;
-              }
-              elsif ($modifier eq '-' and $suffix !~ /0/ and $format =~ /[CdgGHIjmMNsSuUVwWyYz]$/) {
-                  $str =~ s/^([+-])(0+)(\d:.*?|\d$)/$1$3/g;
-                  $str =~ s/^(0+)(.+?)$/$2/g;
-              }
-              elsif ($modifier eq '-') {
-                  $str =~ s/^ +//ge;
-              }
-              elsif ($modifier eq '0' and $suffix !~ /_/) {
-                  $str =~ s/^( +)/'0' x length($1)/ge;
-              }
-              elsif ($modifier eq '^' and "$prefix$suffix" =~ /#/ and $format =~ /Z$/) {
-                  $str = lc($str);
-              }
-              elsif ($modifier eq '^' and $format !~ /[pP]$/) {
-                  $str = uc($str);
-              }
-              elsif ($modifier eq '#' and $format =~ /[aAbBh]$/) {
-                  $str = uc($str);
-              }
-              elsif ($modifier eq '#' and $format =~ /[pZ]$/) {
-                  $str = lc($str);
-              };
-  
-              last unless $prefix =~ s/(.)$//;
-              $suffix = "$modifier$suffix";
-              $modifier = $1;
-          };
-  
-          return $str;
-      };
-  
-      my $strftime_0z = sub {
-          my ($digits, $format, @t) = @_;
-          $digits --;
-          my $str = strftime($format, @t);
-          $str =~ /^([+-])(.*)$/ or return $format;
-          return $1 . sprintf "%0${digits}s", $2;
-      };
-  
-      # recursively handle modifiers
-      $fmt =~ s/%([_0\^#-]*)([_0\^#-])((?:[1-9][0-9]*)?:*[EO]?[a-zA-Z])/$strftime_modifier->($1, $2, $3, @t)/ge;
-      $fmt =~ s/%([_0\^#-]*)([_0\^#-])((?:[1-9][0-9]*)?[%])/$strftime_modifier->($1, $2, $3, @t) . '%'/ge;
-  
-      # numbers before character
-      $fmt =~ s/%([1-9][0-9]*)([EO]?[aAbBDeFhklnpPrRtTxXZ])/sprintf("%$1s", strftime("%$2", @t))/ge;
-      $fmt =~ s/%([1-9][0-9]*)([%])/sprintf("%$1s%%", '%')/ge;
-      $fmt =~ s/%([1-9][0-9]*)([EO]?[CdGgHIjmMsSuUVwWyY])/sprintf("%0$1s", strftime("%$2", @t))/ge;
-      $fmt =~ s/%([1-9][0-9]*)([N])/sprintf("%0$1.$1s", strftime("%$2", @t))/ge;
-      $fmt =~ s/%([1-9][0-9]*)(:*[z])/$strftime_0z->($1, "%$2", @t)/ge;
-  
-      # "E", "O", ":" modifiers
-      $fmt =~ s/%E([CcXxYy])/%$1/;
-      $fmt =~ s/%O([deHIMmSUuVWwy])/%$1/;
-      $fmt =~ s/%(:{0,3})?(z)/$format{$2}->(length $1, @t)/ge;
-  
-      # supported by Pure Perl
-      $fmt =~ s/%([$formats])/$format{$1}->(@t)/ge;
-  
-      # as-is if there is some modifiers left
-      $fmt =~ s/%([_0\^#-]+(?:[1-9][0-9]*)?|[_0\^#-]?(?:[1-9][0-9]*))([a-zA-Z%])/%%$1$2/;
-  
-      return strftime_orig($fmt, @t);
-  };
-  
-  1;
-  
-  
-  =head1 PERFORMANCE
-  
-  The PP module is about 10 times slower than XS module.
-  
-  =head1 SEE ALSO
-  
-  L<POSIX::strftime::GNU>.
-  
-  =head1 AUTHOR
-  
-  Piotr Roszatycki <dexter@cpan.org>
-  
-  =head1 LICENSE
-  
-  Copyright (c) 2012-2014 Piotr Roszatycki <dexter@cpan.org>.
-  
-  This is free software; you can redistribute it and/or modify it under
-  the same terms as perl itself.
-  
-  ISO 8601 functions:
-  
-  Copyright (c) 1991-2001, 2003-2007, 2009-2012 Free Software Foundation, Inc.
-  
-  This program is free software: you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 3 of the License, or
-  (at your option) any later version.
-  
-  See L<http://dev.perl.org/licenses/artistic.html>
-X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU_PP
-
-$fatpacked{"x86_64-linux-thread-multi/POSIX/strftime/GNU/XS.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU_XS';
-  #!/usr/bin/perl -c
-  
-  package POSIX::strftime::GNU::XS;
-  
-  =head1 NAME
-  
-  POSIX::strftime::GNU::XS - XS extension for POSIX::strftime::GNU
-  
-  =head1 SYNOPSIS
-  
-    $ export PERL_POSIX_STRFTIME_GNU_XS=1
-  
-  =head1 DESCRIPTION
-  
-  This is XS extension for POSIX::strftime which implements more character
-  sequences compatible with GNU systems.
-  
-  =cut
-  
-  
-  use 5.006;
-  use strict;
-  use warnings;
-  
-  our $VERSION = '0.0304';
-  
-  use Carp ();
-  use Config;
-  use POSIX ();
-  
-  require XSLoader;
-  XSLoader::load(__PACKAGE__, $VERSION);
-  
-  
-  =head1 FUNCTIONS
-  
-  =head2 strftime
-  
-    $str = strftime($format, @time)
-  
-  This is replacement for L<POSIX::strftime|POSIX/strftime> function.
-  
-  The non-POSIX feature is that seconds can be float number.
-  
-  =cut
-  
-  
-  1;
-  
-  
-  =head1 SEE ALSO
-  
-  L<POSIX::strftime::GNU>.
-  
-  =head1 AUTHOR
-  
-  Piotr Roszatycki <dexter@cpan.org>
-  
-  =head1 LICENSE
-  
-  Copyright (c) 2012-2014 Piotr Roszatycki <dexter@cpan.org>.
-  
-  This is free software; you can redistribute it and/or modify it under
-  the same terms as perl itself.
-  
-  strftime function:
-  
-  Copyright (c) 1991-2001, 2003-2007, 2009-2012 Free Software Foundation, Inc.
-  
-  This program is free software: you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 3 of the License, or
-  (at your option) any later version.
-  
-  See L<http://dev.perl.org/licenses/artistic.html>
-X86_64-LINUX-THREAD-MULTI_POSIX_STRFTIME_GNU_XS
 
 s/^  //mg for values %fatpacked;
 

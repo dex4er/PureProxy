@@ -30,6 +30,7 @@ use=`
 delete=`
     for mod in \
         Sub::Name \
+        Time::TZOffset \
     ; do
         path=$(echo "$mod" | sed 's,::,/,g')
         printf "\,^$path\.pm$,d; "
