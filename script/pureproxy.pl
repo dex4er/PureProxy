@@ -33,19 +33,20 @@ my $app = builder {
 use Plack;
 use Plack::Runner;
 
-use if SERVER eq 'Thrall', 'Thrall';
-use if SERVER eq 'Starlight', 'Starlight';
-
-sub version {
-    print "PureProxy/$VERSION ", SERVER, "/", SERVER->VERSION, " Plack/", Plack->VERSION, " Perl/$]\n";
-}
-
 my $runner = Plack::Runner->new(
     server     => SERVER,
     env        => 'proxy',
     loader     => 'Delayed',
     version_cb => \&version,
 );
+
+sub version {
+    my $server = $runner->{server};
+    my $server_version = eval { Plack::Util::load_class($server); $server->VERSION }
+                      || eval { Plack::Util::load_class("Plack::Handler::$server"); "Plack::Handler::$server"->VERSION }
+                      || 0;
+    print "PureProxy/$VERSION $server/$server_version Plack/", Plack->VERSION, " Perl/$]\n";
+}
 
 $runner->parse_options('--server-software', "PureProxy/$VERSION", @ARGV);
 
