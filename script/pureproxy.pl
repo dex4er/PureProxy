@@ -40,15 +40,20 @@ my $runner = Plack::Runner->new(
     version_cb => \&version,
 );
 
-sub version {
+sub _version () {
     my $server = $runner->{server};
     my $server_version = eval { Plack::Util::load_class($server); $server->VERSION }
                       || eval { Plack::Util::load_class("Plack::Handler::$server"); "Plack::Handler::$server"->VERSION }
                       || 0;
-    print "PureProxy/$VERSION $server/$server_version Plack/", Plack->VERSION, " Perl/$]\n";
+    return "PureProxy/$VERSION $server/$server_version Plack/" . Plack->VERSION . " Perl/$]";
 }
 
-$runner->parse_options('--server-software', "PureProxy/$VERSION", @ARGV);
+sub version {
+    my ($class) = @_;
+    print _version(), "\n";
+}
+
+$runner->parse_options('--server-software', _version(), @ARGV);
 
 if ($runner->{help}) {
     require Pod::Usage;
