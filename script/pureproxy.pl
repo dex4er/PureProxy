@@ -45,7 +45,7 @@ sub _version () {
     my $server_version = eval { Plack::Util::load_class($server); $server->VERSION }
                       || eval { Plack::Util::load_class("Plack::Handler::$server"); "Plack::Handler::$server"->VERSION }
                       || 0;
-    return "PureProxy/$VERSION $server/$server_version Plack/" . Plack->VERSION . " Perl/$]";
+    return "PureProxy/$VERSION $server/$server_version Plack/" . Plack->VERSION . " Perl/$] ($^O)";
 }
 
 sub version {
@@ -53,7 +53,7 @@ sub version {
     print _version(), "\n";
 }
 
-$runner->parse_options('--server-software', _version(), @ARGV);
+$runner->parse_options(@ARGV);
 
 if ($runner->{help}) {
     require Pod::Usage;
@@ -77,6 +77,8 @@ if ($options{traffic_log}) {
 if (not exists $options{access_log}) {
     $app = builder { enable 'AccessLog'; $app; };
 }
+
+push @{$runner->{options}}, 'server_software', _version();
 
 $runner->run($app);
 
