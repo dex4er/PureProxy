@@ -20,6 +20,7 @@ my $build = Module::Build::My->new(
         'perl'                  => 5.008,   # open $my
         'Plack::Middleware::Proxy::Connect::IO'         => 0,
         'Plack::Middleware::Proxy::Requests'            => 0,
+        $^O =~ /^(MSWin32|cygwin)$/ ? 'Thrall' : 'Starlight' => 0,
     },
     build_requires          => {
         'Test::More'            => 0,
