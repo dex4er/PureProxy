@@ -8,6 +8,8 @@ use warnings;
 use lib 'inc';
 use Module::Build::My;
 
+use Config;
+
 my $module = 'App::PureProxy';
 
 (my $dist = $module) =~ s/::/-/g;
@@ -18,9 +20,16 @@ my $build = Module::Build::My->new(
     license                 => 'perl',
     requires                => {
         'perl'                  => 5.008,   # open $my
+        'Plack::App::Proxy::Backend::HTTP::Tiny'        => 0,
         'Plack::Middleware::Proxy::Connect::IO'         => 0,
         'Plack::Middleware::Proxy::Requests'            => 0,
         $^O =~ /^(MSWin32|cygwin)$/ ? 'Thrall' : 'Starlight' => 0,
+    },
+    recommends              => {
+        'Plack::Middleware::TrafficLog'                 => 0,
+    },
+    suggests                => {
+        $Config{useithreads} ? ('Thrall' => 0) : (),
     },
     build_requires          => {
         'Test::More'            => 0,
