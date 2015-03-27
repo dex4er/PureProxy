@@ -41,7 +41,7 @@ delete=`
 
 cd `dirname $0`
 
-rm -f fatpacker.trace packlist pureproxy
+rm -f fatpacker.trace packlists pureproxy
 rm -rf fatlib
 
 PLACK_HTTP_PARSER_PP=1 fatpack trace $use ../script/pureproxy.pl

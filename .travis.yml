@@ -1,0 +1,13 @@
+# [![Build Status](https://travis-ci.org/dex4er/PureProxy?branch=master)](https://travis-ci.org/dex4er/PureProxy)
+
+language: perl
+before_install:
+  - sudo apt-get update -qq
+install:
+  - sudo apt-get install -qq spell
+  - cpanm --with-recommends --installdeps --notest --skip-satisfied git://github.com/dex4er/perl-DEXTER-Module-Skeleton
+  - cpanm --with-recommends --installdeps --notest --skip-satisfied .
+script: ./Dist.SH
+perl:
+  - '5.20'
+  - '5.8'

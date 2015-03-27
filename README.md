@@ -1,0 +1,35 @@
+[![Build Status](https://travis-ci.org/dex4er/PureProxy?branch=master)](https://travis-ci.org/dex4er/PureProxy)
+
+# NAME
+
+pureproxy - a Pure Perl HTTP proxy server
+
+# SYNOPSIS
+
+    pureproxy --port=5000 --workers=10
+
+# DESCRIPTION
+
+This is pure-Perl proxy HTTP server which can be run on almost every Perl
+installation.
+
+# SEE ALSO
+
+[http://github.com/dex4er/PureProxy](http://github.com/dex4er/PureProxy).
+
+# BUGS
+
+This tool has unstable features and can change in future.
+
+# AUTHOR
+
+Piotr Roszatycki <dexter@cpan.org>
+
+# LICENSE
+
+Copyright (c) 2014 Piotr Roszatycki <dexter@cpan.org>.
+
+This is free software; you can redistribute it and/or modify it under
+the same terms as perl itself.
+
+See [http://dev.perl.org/licenses/artistic.html](http://dev.perl.org/licenses/artistic.html)
