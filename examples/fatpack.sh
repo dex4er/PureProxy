@@ -60,7 +60,11 @@ for mod in \
     Time::Local \
 ; do
     path=$(echo "$mod" | sed 's,::,/,g')
-    test -f fatlib/$path.pm || die "Missing module at site_perl. Reinstall it with command:\ncpanm --reinstall %s" $mod
+    if [ ! -f fatlib/$path.pm ]; then
+        mkdir -p fatlib/$(dirname $path)
+        cp -f $(perl -le "use $mod (); print \$INC{'$path.pm'}") fatlib/$path.pm  # "
+        test -f fatlib/$path.pm || die "Missing module at site_perl. Reinstall it with command:\ncpanm --reinstall %s" $mod
+    fi
 done
 
 rm -rf fatlib/auto/share
