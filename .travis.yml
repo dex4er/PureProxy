@@ -1,4 +1,4 @@
-# [![Build Status](https://travis-ci.org/dex4er/PureProxy?branch=master)](https://travis-ci.org/dex4er/PureProxy)
+# [![Build Status](https://travis-ci.org/dex4er/PureProxy.png?branch=master)](https://travis-ci.org/dex4er/PureProxy)
 
 language: perl
 before_install:
