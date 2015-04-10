@@ -48,8 +48,8 @@ my $build = Module::Build::My->new(
     ],
     meta_merge              => {
         resources               => {
-            bugtracker => "http://github.com/dex4er/PureProxy/issues",
-            repository => "http://github.com/dex4er/PureProxy",
+            bugtracker => "https://github.com/dex4er/PureProxy/issues",
+            repository => "https://github.com/dex4er/PureProxy.git",
         },
     },
 );
