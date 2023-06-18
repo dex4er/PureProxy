@@ -1,5 +1,6 @@
 0.0101  2023-06-18      Piotr Roszatycki <dexter@cpan.org>
 
+* Requires Thrall 0.0401 and Starlight 0.0501.
 * Provides cpanfile.
 
 0.0100  2015-03-28      Piotr Roszatycki <dexter@cpan.org>

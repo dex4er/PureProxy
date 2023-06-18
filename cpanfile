@@ -4,8 +4,8 @@ requires 'Plack', '0.9920';
 requires 'Plack::App::Proxy::Backend::HTTP::Tiny';
 requires 'Plack::Middleware::Proxy::Connect::IO';
 requires 'Plack::Middleware::Proxy::Requests';
-requires 'Thrall';
-requires 'Starlight';
+requires 'Thrall', '0.0401';
+requires 'Starlight', '0.0501';
 
 recommends 'IO::Socket::IP';
 recommends 'Plack::Middleware::TrafficLog';
