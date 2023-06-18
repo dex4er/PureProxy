@@ -20,7 +20,7 @@ BEGIN {
     }
 }
 
-BEGIN {
+INIT {
     if ($^O eq 'darwin' && $ENV{OBJC_DISABLE_INITIALIZE_FORK_SAFETY} ne 'YES') {
         $ENV{OBJC_DISABLE_INITIALIZE_FORK_SAFETY} = 'YES';
         exec $0, @ARGV;
