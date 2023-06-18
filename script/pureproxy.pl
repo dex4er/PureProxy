@@ -160,7 +160,7 @@ and L<Starlight> otherwise.
 
 =for markdown ```sh
 
-    lwp-request -m get http://git.io/jEE6 | sh
+    lwp-request -m get https://raw.githubusercontent.com/dex4er/PureProxy/master/fatpack/install.sh | sh
 
 =for markdown ```
 
@@ -168,7 +168,7 @@ or
 
 =for markdown ```sh
 
-    curl -qsSL http://git.io/jEE6 | sh
+    curl -qsSL https://raw.githubusercontent.com/dex4er/PureProxy/master/fatpack/install.sh | sh
 
 =for markdown ```
 
@@ -176,7 +176,7 @@ or
 
 =for markdown ```sh
 
-    wget --quiet -O- http://git.io/jEE6 | sh
+    wget --quiet -O- https://raw.githubusercontent.com/dex4er/PureProxy/master/fatpack/install.sh | sh
 
 =for markdown ```
 

@@ -80,6 +80,7 @@
 ^local\b
 
 # fatpack
-^examples/fatpacker\.trace$
-^examples/packlists$
-^examples/fatlib\b
+^fatpack/fatpacker\.trace$
+^fatpack/packlists$
+^fatpack/fatlib\b
+^fatpack/pureproxy$

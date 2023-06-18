@@ -4,11 +4,11 @@ requires 'Plack', '0.9920';
 requires 'Plack::App::Proxy::Backend::HTTP::Tiny';
 requires 'Plack::Middleware::Proxy::Connect::IO';
 requires 'Plack::Middleware::Proxy::Requests';
-requires 'Thrall', '0.0401';
 requires 'Starlight', '0.0501';
 
 recommends 'IO::Socket::IP';
 recommends 'Plack::Middleware::TrafficLog';
+recommends 'Thrall', '0.0402';
 
 suggests 'IO::Socket::SSL';
 suggests 'Net::SSLeay', '1.49';
@@ -29,6 +29,7 @@ feature fatpack => sub {
     requires 'HTTP::Parser';
     requires 'HTTP::Tiny';
     requires 'Time::Local';
+    requires 'Thrall', '0.0402';
 };
 
 on develop => sub {

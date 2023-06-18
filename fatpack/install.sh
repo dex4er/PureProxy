@@ -1,6 +1,6 @@
 #!/bin/sh
 
-url='https://raw.githubusercontent.com/dex4er/PureProxy/master/examples/pureproxy'
+url='https://raw.githubusercontent.com/dex4er/PureProxy/master/fatpack/pureproxy'
 script='pureproxy'
 
 if command -v curl >/dev/null; then
@@ -13,8 +13,10 @@ elif command -v lwp-request >/dev/null; then
     get='lwp-request -m get'
 fi
 
-if [ -w /usr/local/bin ]; then
+if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
     dir=/usr/local/bin
+elif [ -d "${HOME}/.local/bin" ] && [ -w "${HOME}/.local/bin" ]; then
+    dir="${HOME}/.local/bin"
 else
     dir="${HOME}/bin"
 fi

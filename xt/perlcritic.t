@@ -9,4 +9,4 @@ require Test::Perl::Critic;
 
 Test::Perl::Critic->import(-profile => '.perlcriticrc');
 
-all_critic_ok('examples', 'lib', 't', 'xt', 'Build.PL');
+all_critic_ok('fatpack', 'lib', 't', 'xt', 'Build.PL');

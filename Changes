@@ -2,6 +2,8 @@
 
 * Requires Thrall 0.0401 and Starlight 0.0501.
 * Provides cpanfile.
+* Removed fatpack from the manifest.
+* git.io is not used as it is obsoleted.
 
 0.0100  2015-03-28      Piotr Roszatycki <dexter@cpan.org>
 
