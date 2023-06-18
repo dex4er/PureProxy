@@ -54,7 +54,7 @@ my $app = builder {
 use Plack;
 use Plack::Runner;
 
-my $runner = Plack::Runner->new(server => SERVER, env => 'proxy', version_cb => \&version,);
+my $runner = Plack::Runner->new(server => SERVER, env => 'proxy', loader => 'Plack::Loader', version_cb => \&version,);
 
 sub _version () {
     my $server = $runner->{server};
