@@ -80,6 +80,7 @@ for mod in \
 done
 
 rm -rf fatlib/auto/share
+find fatlib \( -name .keep -o -name '*.bundle' -o -name '*.pod' \) -print0 | xargs -0r rm -f
 
 ${FATPACK} file ../script/pureproxy.pl >pureproxy
 
