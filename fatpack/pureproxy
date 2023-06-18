@@ -30952,7 +30952,11 @@ BEGIN {
     *warnings::import = sub { };
 }
 
-use constant SERVER => $ENV{PUREPROXY_SERVER} || $^O =~ /MSWin32|cygwin/ ? 'Thrall' : 'Starlight';
+use Config;
+
+use constant SERVER => $ENV{PUREPROXY_SERVER}
+    || $^O =~ /MSWin32|cygwin/
+    || $Config{useithreads} ? 'Thrall' : 'Starlight';
 
 BEGIN {
     delete $ENV{http_proxy};
