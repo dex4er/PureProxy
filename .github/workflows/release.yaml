@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     container:
-      image: perldocker/perl-tester:5.36
+      image: perl:5.36-threaded
 
     steps:
       - name: Checkout
@@ -31,8 +31,11 @@ jobs:
           echo "$GITHUB_WORKSPACE/local/bin" | tee -a $GITHUB_PATH
           echo "PERL5LIB=$GITHUB_WORKSPACE/local/lib/perl5" | tee -a $GITHUB_ENV
 
+      - name: Install cpm
+        run: curl -fsSL https://raw.githubusercontent.com/skaji/cpm/main/cpm | perl - install --color --no-test App::cpm
+
       - name: Install required dependencies
-        run: cpm install --color --no-test --with-recommends --with-suggests
+        run: cpm install --color --no-test --with-configure --with-recommends --with-suggests
 
       - name: Install extra dependencies
         run: cpm install --color --no-test --with-develop

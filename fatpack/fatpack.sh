@@ -40,7 +40,7 @@ delete=$(
     done
 )
 
-# cpanm --reinstall if parent Exporter HTTP::Tiny
+# cpm install --reinstall if parent Exporter HTTP::Tiny
 
 cd "$(dirname "$0")" || exit 0
 

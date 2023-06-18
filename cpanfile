@@ -23,6 +23,7 @@ on test => sub {
 };
 
 feature fatpack => sub {
+    requires 'if';
     requires 'parent';
     requires 'App::FatPacker';
     requires 'Exporter';

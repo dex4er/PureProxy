@@ -31,10 +31,10 @@ jobs:
           echo "PERL5LIB=$GITHUB_WORKSPACE/local/lib/perl5" | tee -a $GITHUB_ENV
 
       - name: Install cpm
-        run: curl -sL https://git.io/cpm | perl - install --color --no-test App::cpm
+        run: curl -fsSL https://raw.githubusercontent.com/skaji/cpm/main/cpm | perl - install --color --no-test App::cpm
 
       - name: Install required dependencies
-        run: cpm install --color --no-test --with-recommends --with-suggests
+        run: cpm install --color --no-test --with-configure --with-recommends --with-suggests
 
       - name: Install linters
         run: cpm install --color --no-test Perl::Critic Perl::Critic::Community Perl::Tidy
