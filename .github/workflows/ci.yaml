@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test_with_cpm:
+    strategy:
+      fail-fast: false
+      matrix:
+        perl-version:
+          - "5.36"
+          - "5.34"
+          - "5.32"
+          - "5.30"
+          - "5.28"
+          - "5.26"
+          - "5.24"
+          - "5.22"
+          - "5.20"
+          - "5.18"
+          - "5.16"
+          - "5.14"
+          - "5.12"
+
+    runs-on: ubuntu-latest
+
+    container:
+      image: perldocker/perl-tester:${{ matrix.perl-version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Use cache
+        uses: actions/cache@v3
+        with:
+          path: local/
+          key: cpm-ci-${{ matrix.perl-version }}-${{ runner.os }}-${{ hashFiles('cpanfile') }}
+
+      - name: Use local Perl packages
+        run: |
+          echo "$GITHUB_WORKSPACE/local/bin" | tee -a $GITHUB_PATH
+          echo "PERL5LIB=$GITHUB_WORKSPACE/local/lib/perl5" | tee -a $GITHUB_ENV
+
+      - name: Install required dependencies
+        run: cpm install --color --no-test --with-recommends --with-suggests
+
+      - name: Install extra dependencies
+        if: matrix.perl-version == '5.36'
+        run: cpm install --color --no-test --with-develop
+
+      - name: Skip extra tests
+        run: echo 'TEST_SKIP_EXTRA=${{ (matrix.perl-version == '5.36' && 'perlcritic.t') || '1' }}' >> $GITHUB_ENV
+
+      - name: Make distribution
+        run: ./Dist.SH
+
+      - name: Verify changed files
+        uses: tj-actions/verify-changed-files@v14
+
+  test_with_cpanm:
+    strategy:
+      fail-fast: false
+      matrix:
+        perl-version:
+          - "5.10"
+          - "5.8"
+
+    runs-on: ubuntu-latest
+
+    container:
+      image: perldocker/perl-tester:${{ matrix.perl-version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install required dependencies
+        run: for i in 1 2 3; do cpanm --with-recommends --with-suggests --installdeps --notest --skip-satisfied .; done
+
+      - name: Skip extra tests
+        run: echo 'TEST_SKIP_EXTRA=1' >> $GITHUB_ENV
+
+      - name: Make distribution
+        run: ./Dist.SH
+
+      - name: Verify changed files
+        uses: tj-actions/verify-changed-files@v14

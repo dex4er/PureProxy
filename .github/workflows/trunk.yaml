@@ -1,0 +1,45 @@
+name: Trunk Check
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch: {}
+
+jobs:
+  trunk:
+    name: Trunk Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Use cache
+        uses: actions/cache@v3
+        with:
+          path: local/
+          key: cpm-trunk-${{ runner.os }}-${{ hashFiles('cpanfile') }}
+
+      - name: Use local Perl packages
+        run: |
+          echo "$GITHUB_WORKSPACE/local/bin" | tee -a $GITHUB_PATH
+          echo "PERL5LIB=$GITHUB_WORKSPACE/local/lib/perl5" | tee -a $GITHUB_ENV
+
+      - name: Install cpm
+        run: curl -sL https://git.io/cpm | perl - install --color --no-test App::cpm
+
+      - name: Install required dependencies
+        run: cpm install --color --no-test --with-recommends --with-suggests
+
+      - name: Install linters
+        run: cpm install --color --no-test Perl::Critic Perl::Critic::Community Perl::Tidy
+
+      - name: Trunk Check
+        uses: trunk-io/trunk-action@v1
+        with:
+          check-mode: all

@@ -2,13 +2,30 @@
 
 =head1 NAME
 
-pureproxy - a Pure Perl HTTP proxy server
+pureproxy - Pure Perl HTTP proxy server
 
 =cut
 
+use strict;
+use warnings;
+
 no warnings;
 
-our $VERSION = '0.0100';
+our $VERSION = '0.0101';
+
+BEGIN {
+    if ($INC[0] =~ /^FatPacked::/) {
+        require Clone::PP;
+        $INC{'Clone/PP.pm'} = $INC{'Clone'};
+    }
+}
+
+BEGIN {
+    if ($^O eq 'darwin' && $ENV{OBJC_DISABLE_INITIALIZE_FORK_SAFETY} ne 'YES') {
+        $ENV{OBJC_DISABLE_INITIALIZE_FORK_SAFETY} = 'YES';
+        exec $0, @ARGV;
+    }
+}
 
 BEGIN {
     *warnings::import = sub { };
@@ -33,18 +50,14 @@ my $app = builder {
 use Plack;
 use Plack::Runner;
 
-my $runner = Plack::Runner->new(
-    server     => SERVER,
-    env        => 'proxy',
-    loader     => 'Delayed',
-    version_cb => \&version,
-);
+my $runner = Plack::Runner->new(server => SERVER, env => 'proxy', version_cb => \&version,);
 
 sub _version () {
     my $server = $runner->{server};
-    my $server_version = eval { Plack::Util::load_class($server); $server->VERSION }
-                      || eval { Plack::Util::load_class("Plack::Handler::$server"); "Plack::Handler::$server"->VERSION }
-                      || 0;
+    my $server_version
+        = eval  { Plack::Util::load_class($server);                   $server->VERSION }
+        || eval { Plack::Util::load_class("Plack::Handler::$server"); "Plack::Handler::$server"->VERSION }
+        || 0;
     return "PureProxy/$VERSION $server/$server_version Plack/" . Plack->VERSION . " Perl/$] ($^O)";
 }
 
@@ -60,17 +73,22 @@ if ($runner->{help}) {
     Pod::Usage::pod2usage(-verbose => 1, -input => \*DATA);
 }
 
-my %options = @{$runner->{options}};
+my %options = @{ $runner->{options} };
 
 if ($options{traffic_log}) {
-    $body_eol = $options{traffic_log_body_eol};
+    my $body_eol = $options{traffic_log_body_eol};
     if ($options{traffic_log} ne '1') {
-        open my $logfh, ">>", $options{traffic_log}
-            or die "open($options{traffic_log}): $!";
+        open my $logfh, ">>", $options{traffic_log} or die "open($options{traffic_log}): $!";
         $logfh->autoflush(1);
-        $app = builder { enable 'TrafficLog', logger => sub { $logfh->print( @_ ) }, body_eol => $body_eol, with_body => !! $body_eol; $app; };
+        $app = builder {
+            enable 'TrafficLog',
+                logger    => sub { $logfh->print(@_) },
+                body_eol  => $body_eol,
+                with_body => !!$body_eol;
+            $app;
+        };
     } else {
-        $app = builder { enable 'TrafficLog', body_eol => $body_eol, with_body => !! $body_eol; $app; };
+        $app = builder { enable 'TrafficLog', body_eol => $body_eol, with_body => !!$body_eol; $app; };
     }
 }
 
@@ -79,7 +97,7 @@ if (not defined $runner->{access_log} or $runner->{access_log} eq '1') {
     $app = builder { enable 'AccessLog'; $app; };
 }
 
-push @{$runner->{options}}, 'server_software', _version();
+push @{ $runner->{options} }, 'server_software', _version();
 
 $runner->run($app);
 
@@ -87,19 +105,23 @@ __DATA__
 
 =head1 SYNOPSIS
 
-  pureproxy --host=0.0.0.0 --port=5000 --workers=10 --server Starlight
+=for markdown ```sh
 
-  pureproxy --traffic-log=traffic.log --traffic-log-body-eol='|'
+    pureproxy --host=0.0.0.0 --port=5000 --workers=10 --server Starlight
 
-  pureproxy --access-log=access.log
+    pureproxy --traffic-log=traffic.log --traffic-log-body-eol='|'
 
-  pureproxy --other-plackup-options
+    pureproxy --access-log=access.log
 
-  pureproxy -v
+    pureproxy --other-plackup-options
 
-  http_proxy=http://localhost:5000/ lwp-request http://www.perl.org/
+    pureproxy -v
 
-  https_proxy=http://localhost:5000/ lwp-request https://metacpan.org/
+    http_proxy=http://localhost:5000/ lwp-request -m get http://www.perl.org/
+
+    https_proxy=http://localhost:5000/ lwp-request -m get https://metacpan.org/
+
+=for markdown ```
 
 =head1 DESCRIPTION
 
@@ -128,19 +150,35 @@ and L<Starlight> otherwise.
 
 =head2 With cpanm(1)
 
-  $ cpanm App::PureProxy
+=for markdown ```sh
+
+    cpanm App::PureProxy
+
+=for markdown ```
 
 =head2 Directly
 
-  $ lwp-request http://git.io/jEE6 | sh
+=for markdown ```sh
+
+    lwp-request -m get http://git.io/jEE6 | sh
+
+=for markdown ```
 
 or
 
-  $ curl -kL http://git.io/jEE6 | sh
+=for markdown ```sh
+
+    curl -qsSL http://git.io/jEE6 | sh
+
+=for markdown ```
 
 or
 
-  $ wget --quiet -O- http://git.io/jEE6 | sh
+=for markdown ```sh
+
+    wget --quiet -O- http://git.io/jEE6 | sh
+
+=for markdown ```
 
 =head1 SEE ALSO
 
@@ -156,7 +194,7 @@ Piotr Roszatycki <dexter@cpan.org>
 
 =head1 LICENSE
 
-Copyright (c) 2014-2015 Piotr Roszatycki <dexter@cpan.org>.
+Copyright (c) 2014-2015, 2023 Piotr Roszatycki <dexter@cpan.org>.
 
 This is free software; you can redistribute it and/or modify it under
 the same terms as perl itself.

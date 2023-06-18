@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+
+    permissions:
+      id-token: write
+      contents: write
+
+    runs-on: ubuntu-latest
+
+    container:
+      image: perldocker/perl-tester:5.36
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Use local Perl packages
+        run: |
+          echo "$GITHUB_WORKSPACE/local/bin" | tee -a $GITHUB_PATH
+          echo "PERL5LIB=$GITHUB_WORKSPACE/local/lib/perl5" | tee -a $GITHUB_ENV
+
+      - name: Install required dependencies
+        run: cpm install --color --no-test --with-recommends --with-suggests
+
+      - name: Install extra dependencies
+        run: cpm install --color --no-test --with-develop
+
+      - name: Install pause CLI
+        run: cpm install --color --no-test App::pause Data::Sah::Type::str
+
+      - name: Make distribution
+        run: ./Dist.SH
+
+      - name: Configure pause CLI
+        run: |
+          cat > ~/pause.conf <<END
+          username=${{ vars.PAUSE_USERNAME }}
+          password=${{ secrets.PAUSE_PASSWORD }}
+          END
+
+      - name: Upload distribution
+        run: pause upload *-${{ github.ref_name }}.tar.gz

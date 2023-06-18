@@ -1,13 +1,17 @@
 #!/bin/sh
 
-die () {
+PERL=${PERL:-perl}
+FATPACK=${FATPACK:-fatpack}
+
+die() {
     msg="$1\n"
     shift
-    printf "$msg" "$@" 1>&2
+    # shellcheck disable=SC2059
+    printf "${msg}" "$@" 1>&2
     exit 1
 }
 
-use=`
+use=$(
     for mod in \
         parent \
         Exporter \
@@ -15,61 +19,69 @@ use=`
         HTTP::Tiny \
         Plack::App::Proxy \
         Plack::App::Proxy::Backend::HTTP::Tiny \
+        Plack::Builder \
         Plack::Handler::Starlight \
         Plack::Handler::Thrall \
         Plack::Middleware::AccessLog \
         Plack::Middleware::Proxy::Requests \
         Plack::Middleware::Proxy::Connect::IO \
         Plack::Middleware::TrafficLog \
-        Time::Local \
-    ; do
-        echo "--use=$mod"
+        Time::Local; do
+        echo "--use=${mod}"
     done
-`
+)
 
-delete=`
+delete=$(
     for mod in \
         Sub::Name \
-        Time::TZOffset \
-    ; do
-        path=$(echo "$mod" | sed 's,::,/,g')
-        printf "\,^$path\.pm$,d; "
+        Time::TZOffset; do
+        path=$(echo "${mod}" | sed 's,::,/,g')
+        printf "%s" "next if m{^${path}\.pm$}; "
     done
-`
+)
 
 # cpanm --reinstall if parent Exporter HTTP::Tiny
 
-cd `dirname $0`
+cd "$(dirname "$0")" || exit 0
 
 rm -f fatpacker.trace packlists pureproxy
 rm -rf fatlib
 
-PLACK_HTTP_PARSER_PP=1 fatpack trace $use ../script/pureproxy.pl
+# shellcheck disable=SC2086
+PLACK_HTTP_PARSER_PP=1 ${FATPACK} trace ${use} ../script/pureproxy.pl
 
-sed -i "$delete" fatpacker.trace
+${PERL} -pi -e "${delete}" fatpacker.trace
 
-fatpack packlists-for `cat fatpacker.trace` >packlists
+# shellcheck disable=SC2046
+${FATPACK} packlists-for $(cat fatpacker.trace) >packlists
 
-fatpack tree `cat packlists`
+# shellcheck disable=SC2046
+${FATPACK} tree $(cat packlists)
 
 for mod in \
     if \
     parent \
+    Clone::PP \
     Exporter \
     HTTP::Tiny \
+    JSON::MaybeXS \
     Time::Local \
-; do
-    path=$(echo "$mod" | sed 's,::,/,g')
-    if [ ! -f fatlib/$path.pm ]; then
-        mkdir -p fatlib/$(dirname $path)
-        cp -f $(perl -le "use $mod (); print \$INC{'$path.pm'}") fatlib/$path.pm  # "
-        test -f fatlib/$path.pm || die "Missing module at site_perl. Reinstall it with command:\ncpanm --reinstall %s" $mod
+    URI \
+    URI::Escape \
+    WWW::Form::UrlEncoded \
+    WWW::Form::UrlEncoded::PP \
+    HTTP::Headers; do
+    path=$(echo "${mod}" | sed 's,::,/,g')
+    if [ ! -f "fatlib/${path}.pm" ]; then
+        mkdir -p "fatlib/$(dirname "${path}")"
+        cp -f "$(${PERL} -le "use ${mod} (); print \$INC{'${path}.pm'}")" "fatlib/${path}.pm" # "
+        test -f "fatlib/${path}.pm" || die "Missing module at site_perl. Reinstall it with command:\ncpanm --reinstall %s" "${mod}"
     fi
 done
 
 rm -rf fatlib/auto/share
 
-fatpack file ../script/pureproxy.pl > pureproxy
+${FATPACK} file ../script/pureproxy.pl >pureproxy
 
-sed -i 's,^#!.*/perl$,#!/usr/bin/env perl,' pureproxy
+${PERL} -pi -e 's{^#!.*/perl$}{#!/usr/bin/env perl}' pureproxy
 chmod +x pureproxy
