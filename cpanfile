@@ -28,10 +28,13 @@ feature fatpack => sub {
     requires 'App::FatPacker';
     requires 'Exporter';
     requires 'Clone::PP';
+    requires 'HTTP::Date';
     requires 'HTTP::Parser';
     requires 'HTTP::Tiny';
-    requires 'Time::Local';
+    requires 'Module::Load';
     requires 'Thrall', '0.0402';
+    requires 'Time::Local';
+    requires 'Try::Tiny';
 };
 
 on develop => sub {

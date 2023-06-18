@@ -69,7 +69,7 @@ jobs:
 
       - name: Reinstall fatpack dependencies
         if: matrix.perl-version == '5.36'
-        run: cpm install --color --no-test --reinstall if parent Exporter HTTP::Tiny
+        run: cpm install --color --no-test --reinstall if parent Exporter HTTP::Date HTTP::Status HTTP::Tiny Module::Load Time::Local Try::Tiny
 
       - name: Skip extra tests
         run: echo 'TEST_SKIP_EXTRA=${{ (matrix.perl-version == '5.36' && 'perlcritic.t') || '1' }}' >> $GITHUB_ENV

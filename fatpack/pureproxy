@@ -1365,6 +1365,683 @@ $fatpacked{"Exporter.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'EXPORT
   
 EXPORTER
 
+$fatpacked{"Exporter/Heavy.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'EXPORTER_HEAVY';
+  package Exporter::Heavy;
+  
+  use strict;
+  no strict 'refs';
+  
+  # On one line so MakeMaker will see it.
+  our $VERSION = '5.77';
+  
+  =head1 NAME
+  
+  Exporter::Heavy - Exporter guts
+  
+  =head1 SYNOPSIS
+  
+  (internal use only)
+  
+  =head1 DESCRIPTION
+  
+  No user-serviceable parts inside.
+  
+  =cut
+  
+  #
+  # We go to a lot of trouble not to 'require Carp' at file scope,
+  #  because Carp requires Exporter, and something has to give.
+  #
+  
+  sub _rebuild_cache {
+      my ($pkg, $exports, $cache) = @_;
+      s/^&// foreach @$exports;
+      @{$cache}{@$exports} = (1) x @$exports;
+      my $ok = \@{"${pkg}::EXPORT_OK"};
+      if (@$ok) {
+  	s/^&// foreach @$ok;
+  	@{$cache}{@$ok} = (1) x @$ok;
+      }
+  }
+  
+  sub heavy_export {
+  
+      # Save the old __WARN__ handler in case it was defined
+      my $oldwarn = $SIG{__WARN__};
+  
+      # First make import warnings look like they're coming from the "use".
+      local $SIG{__WARN__} = sub {
+  	# restore it back so proper stacking occurs
+  	local $SIG{__WARN__} = $oldwarn;
+  	my $text = shift;
+  	if ($text =~ s/ at \S*Exporter\S*.pm line \d+.*\n//) {
+  	    require Carp;
+  	    local $Carp::CarpLevel = 1;	# ignore package calling us too.
+  	    Carp::carp($text);
+  	}
+  	else {
+  	    warn $text;
+  	}
+      };
+      local $SIG{__DIE__} = sub {
+  	require Carp;
+  	local $Carp::CarpLevel = 1;	# ignore package calling us too.
+  	Carp::croak("$_[0]Illegal null symbol in \@${1}::EXPORT")
+  	    if $_[0] =~ /^Unable to create sub named "(.*?)::"/;
+      };
+  
+      my($pkg, $callpkg, @imports) = @_;
+      my($type, $sym, $cache_is_current, $oops);
+      my($exports, $export_cache) = (\@{"${pkg}::EXPORT"},
+                                     $Exporter::Cache{$pkg} ||= {});
+  
+      if (@imports) {
+  	if (!%$export_cache) {
+  	    _rebuild_cache ($pkg, $exports, $export_cache);
+  	    $cache_is_current = 1;
+  	}
+  
+  	if (grep m{^[/!:]}, @imports) {
+  	    my $tagsref = \%{"${pkg}::EXPORT_TAGS"};
+  	    my $tagdata;
+  	    my %imports;
+  	    my($remove, $spec, @names, @allexports);
+  	    # negated first item implies starting with default set:
+  	    unshift @imports, ':DEFAULT' if $imports[0] =~ m/^!/;
+  	    foreach $spec (@imports){
+  		$remove = $spec =~ s/^!//;
+  
+  		if ($spec =~ s/^://){
+  		    if ($spec eq 'DEFAULT'){
+  			@names = @$exports;
+  		    }
+  		    elsif ($tagdata = $tagsref->{$spec}) {
+  			@names = @$tagdata;
+  		    }
+  		    else {
+  			warn qq["$spec" is not defined in %${pkg}::EXPORT_TAGS];
+  			++$oops;
+  			next;
+  		    }
+  		}
+  		elsif ($spec =~ m:^/(.*)/$:){
+  		    my $patn = $1;
+  		    @allexports = keys %$export_cache unless @allexports; # only do keys once
+  		    @names = grep(/$patn/, @allexports); # not anchored by default
+  		}
+  		else {
+  		    @names = ($spec); # is a normal symbol name
+  		}
+  
+  		warn "Import ".($remove ? "del":"add").": @names "
+  		    if $Exporter::Verbose;
+  
+  		if ($remove) {
+  		   foreach $sym (@names) { delete $imports{$sym} } 
+  		}
+  		else {
+  		    @imports{@names} = (1) x @names;
+  		}
+  	    }
+  	    @imports = keys %imports;
+  	}
+  
+          my @carp;
+  	foreach $sym (@imports) {
+  	    if (!$export_cache->{$sym}) {
+  		if ($sym =~ m/^\d/) {
+  		    $pkg->VERSION($sym); # inherit from UNIVERSAL
+  		    # If the version number was the only thing specified
+  		    # then we should act as if nothing was specified:
+  		    if (@imports == 1) {
+  			@imports = @$exports;
+  			last;
+  		    }
+  		    # We need a way to emulate 'use Foo ()' but still
+  		    # allow an easy version check: "use Foo 1.23, ''";
+  		    if (@imports == 2 and !$imports[1]) {
+  			@imports = ();
+  			last;
+  		    }
+  		} elsif ($sym !~ s/^&// || !$export_cache->{$sym}) {
+  		    # Last chance - see if they've updated EXPORT_OK since we
+  		    # cached it.
+  
+  		    unless ($cache_is_current) {
+  			%$export_cache = ();
+  			_rebuild_cache ($pkg, $exports, $export_cache);
+  			$cache_is_current = 1;
+  		    }
+  
+  		    if (!$export_cache->{$sym}) {
+  			# accumulate the non-exports
+  			push @carp,
+  			  qq["$sym" is not exported by the $pkg module];
+  			$oops++;
+  		    }
+  		}
+  	    }
+  	}
+  	if ($oops) {
+  	    require Carp;
+  	    Carp::croak(join("\n", @carp, "Can't continue after import errors"));
+  	}
+      }
+      else {
+  	@imports = @$exports;
+      }
+  
+      my($fail, $fail_cache) = (\@{"${pkg}::EXPORT_FAIL"},
+                                $Exporter::FailCache{$pkg} ||= {});
+  
+      if (@$fail) {
+  	if (!%$fail_cache) {
+  	    # Build cache of symbols. Optimise the lookup by adding
+  	    # barewords twice... both with and without a leading &.
+  	    # (Technique could be applied to $export_cache at cost of memory)
+  	    my @expanded = map { /^\w/ ? ($_, '&'.$_) : $_ } @$fail;
+  	    warn "${pkg}::EXPORT_FAIL cached: @expanded" if $Exporter::Verbose;
+  	    @{$fail_cache}{@expanded} = (1) x @expanded;
+  	}
+  	my @failed;
+  	foreach $sym (@imports) { push(@failed, $sym) if $fail_cache->{$sym} }
+  	if (@failed) {
+  	    @failed = $pkg->export_fail(@failed);
+  	    foreach $sym (@failed) {
+                  require Carp;
+  		Carp::carp(qq["$sym" is not implemented by the $pkg module ],
+  			"on this architecture");
+  	    }
+  	    if (@failed) {
+  		require Carp;
+  		Carp::croak("Can't continue after import errors");
+  	    }
+  	}
+      }
+  
+      warn "Importing into $callpkg from $pkg: ",
+  		join(", ",sort @imports) if $Exporter::Verbose;
+  
+      foreach $sym (@imports) {
+  	# shortcut for the common case of no type character
+  	(*{"${callpkg}::$sym"} = \&{"${pkg}::$sym"}, next)
+  	    unless $sym =~ s/^(\W)//;
+  	$type = $1;
+  	no warnings 'once';
+  	*{"${callpkg}::$sym"} =
+  	    $type eq '&' ? \&{"${pkg}::$sym"} :
+  	    $type eq '$' ? \${"${pkg}::$sym"} :
+  	    $type eq '@' ? \@{"${pkg}::$sym"} :
+  	    $type eq '%' ? \%{"${pkg}::$sym"} :
+  	    $type eq '*' ?  *{"${pkg}::$sym"} :
+  	    do { require Carp; Carp::croak("Can't export symbol: $type$sym") };
+      }
+  }
+  
+  sub heavy_export_to_level
+  {
+        my $pkg = shift;
+        my $level = shift;
+        (undef) = shift;			# XXX redundant arg
+        my $callpkg = caller($level);
+        $pkg->export($callpkg, @_);
+  }
+  
+  # Utility functions
+  
+  sub _push_tags {
+      my($pkg, $var, $syms) = @_;
+      my @nontag = ();
+      my $export_tags = \%{"${pkg}::EXPORT_TAGS"};
+      push(@{"${pkg}::$var"},
+  	map { $export_tags->{$_} ? @{$export_tags->{$_}} 
+                                   : scalar(push(@nontag,$_),$_) }
+  		(@$syms) ? @$syms : keys %$export_tags);
+      if (@nontag and $^W) {
+  	# This may change to a die one day
+  	require Carp;
+  	Carp::carp(join(", ", @nontag)." are not tags of $pkg");
+      }
+  }
+  
+  sub heavy_require_version {
+      my($self, $wanted) = @_;
+      my $pkg = ref $self || $self;
+      return ${pkg}->VERSION($wanted);
+  }
+  
+  sub heavy_export_tags {
+    _push_tags((caller)[0], "EXPORT",    \@_);
+  }
+  
+  sub heavy_export_ok_tags {
+    _push_tags((caller)[0], "EXPORT_OK", \@_);
+  }
+  
+  1;
+EXPORTER_HEAVY
+
+$fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_DATE';
+  package HTTP::Date;
+  
+  use strict;
+  
+  our $VERSION = '6.05';
+  
+  require Exporter;
+  our @ISA       = qw(Exporter);
+  our @EXPORT    = qw(time2str str2time);
+  our @EXPORT_OK = qw(parse_date time2iso time2isoz);
+  
+  require Time::Local;
+  
+  our ( @DoW, @MoY, %MoY );
+  @DoW       = qw(Sun Mon Tue Wed Thu Fri Sat);
+  @MoY       = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+  @MoY{@MoY} = ( 1 .. 12 );
+  
+  my %GMT_ZONE = ( GMT => 1, UTC => 1, UT => 1, Z => 1 );
+  
+  sub time2str (;$) {
+      my $time = shift;
+      $time = time unless defined $time;
+      my ( $sec, $min, $hour, $mday, $mon, $year, $wday ) = gmtime($time);
+      sprintf(
+          "%s, %02d %s %04d %02d:%02d:%02d GMT",
+          $DoW[$wday],
+          $mday, $MoY[$mon], $year + 1900,
+          $hour, $min,       $sec
+      );
+  }
+  
+  sub str2time ($;$) {
+      my $str = shift;
+      return undef unless defined $str;
+  
+      # fast exit for strictly conforming string
+      if ( $str
+          =~ /^[SMTWF][a-z][a-z], (\d\d) ([JFMAJSOND][a-z][a-z]) (\d\d\d\d) (\d\d):(\d\d):(\d\d) GMT$/
+      ) {
+          return eval {
+              my $t = Time::Local::timegm( $6, $5, $4, $1, $MoY{$2} - 1, $3 );
+              $t < 0 ? undef : $t;
+          };
+      }
+  
+      my @d = parse_date($str);
+      return undef unless @d;
+      $d[1]--;    # month
+  
+      my $tz = pop(@d);
+      unless ( defined $tz ) {
+          unless ( defined( $tz = shift ) ) {
+              return eval {
+                  my $frac = $d[-1];
+                  $frac -= ( $d[-1] = int($frac) );
+                  my $t = Time::Local::timelocal( reverse @d ) + $frac;
+                  $t < 0 ? undef : $t;
+              };
+          }
+      }
+  
+      my $offset = 0;
+      if ( $GMT_ZONE{ uc $tz } ) {
+  
+          # offset already zero
+      }
+      elsif ( $tz =~ /^([-+])?(\d\d?):?(\d\d)?$/ ) {
+          $offset = 3600 * $2;
+          $offset += 60 * $3 if $3;
+          $offset *= -1      if $1 && $1 eq '-';
+      }
+      else {
+          eval { require Time::Zone } || return undef;
+          $offset = Time::Zone::tz_offset($tz);
+          return undef unless defined $offset;
+      }
+  
+      return eval {
+          my $frac = $d[-1];
+          $frac -= ( $d[-1] = int($frac) );
+          my $t = Time::Local::timegm( reverse @d ) + $frac;
+          $t < 0 ? undef : $t - $offset;
+      };
+  }
+  
+  sub parse_date ($) {
+      local ($_) = shift;
+      return unless defined;
+  
+      # More lax parsing below
+      s/^\s+//;                                            # kill leading space
+      s/^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s*//i;    # Useless weekday
+  
+      my ( $day, $mon, $yr, $hr, $min, $sec, $tz, $ampm );
+  
+      # Then we are able to check for most of the formats with this regexp
+      (
+          ( $day, $mon, $yr, $hr, $min, $sec, $tz )
+          = /^
+       (\d\d?)               # day
+          (?:\s+|[-\/])
+       (\w+)                 # month
+          (?:\s+|[-\/])
+       (\d+)                 # year
+       (?:
+             (?:\s+|:)       # separator before clock
+          (\d\d?):(\d\d)     # hour:min
+          (?::(\d\d))?       # optional seconds
+       )?                    # optional clock
+          \s*
+       ([-+]?\d{2,4}|(?![APap][Mm]\b)[A-Za-z]+)? # timezone
+          \s*
+       (?:\(\w+\)|\w{3,})?   # ASCII representation of timezone.
+          \s*$
+      /x
+          )
+  
+          ||
+  
+          # Try the ctime and asctime format
+          (
+          ( $mon, $day, $hr, $min, $sec, $tz, $yr )
+          = /^
+       (\w{1,3})             # month
+          \s+
+       (\d\d?)               # day
+          \s+
+       (\d\d?):(\d\d)        # hour:min
+       (?::(\d\d))?          # optional seconds
+          \s+
+       (?:([A-Za-z]+)\s+)?   # optional timezone
+       (\d+)                 # year
+          \s*$               # allow trailing whitespace
+      /x
+          )
+  
+          ||
+  
+          # Then the Unix 'ls -l' date format
+          (
+          ( $mon, $day, $yr, $hr, $min, $sec )
+          = /^
+       (\w{3})               # month
+          \s+
+       (\d\d?)               # day
+          \s+
+       (?:
+          (\d\d\d\d) |       # year
+          (\d{1,2}):(\d{2})  # hour:min
+              (?::(\d\d))?       # optional seconds
+       )
+       \s*$
+         /x
+          )
+  
+          ||
+  
+          # ISO 8601 format '1996-02-29 12:00:00 -0100' and variants
+          (
+          ( $yr, $mon, $day, $hr, $min, $sec, $tz )
+          = /^
+        (\d{4})              # year
+           [-\/]?
+        (\d\d?)              # numerical month
+           [-\/]?
+        (\d\d?)              # day
+       (?:
+             (?:\s+|[-:Tt])  # separator before clock
+          (\d\d?):?(\d\d)    # hour:min
+          (?::?(\d\d(?:\.\d*)?))?  # optional seconds (and fractional)
+       )?                    # optional clock
+          \s*
+       ([-+]?\d\d?:?(:?\d\d)?
+        |Z|z)?               # timezone  (Z is "zero meridian", i.e. GMT)
+          \s*$
+      /x
+          )
+  
+          ||
+  
+          # Windows 'dir' 11-12-96  03:52PM
+          (
+          ( $mon, $day, $yr, $hr, $min, $ampm )
+          = /^
+            (\d{2})                # numerical month
+               -
+            (\d{2})                # day
+               -
+            (\d{2})                # year
+               \s+
+            (\d\d?):(\d\d)([APap][Mm])  # hour:min AM or PM
+               \s*$
+          /x
+          )
+  
+          || return;    # unrecognized format
+  
+      # Translate month name to number
+      $mon
+          = $MoY{$mon}
+          || $MoY{"\u\L$mon"}
+          || ( $mon =~ /^\d\d?$/ && $mon >= 1 && $mon <= 12 && int($mon) )
+          || return;
+  
+      # If the year is missing, we assume first date before the current,
+      # because of the formats we support such dates are mostly present
+      # on "ls -l" listings.
+      unless ( defined $yr ) {
+          my $cur_mon;
+          ( $cur_mon, $yr ) = (localtime)[ 4, 5 ];
+          $yr += 1900;
+          $cur_mon++;
+          $yr-- if $mon > $cur_mon;
+      }
+      elsif ( length($yr) < 3 ) {
+  
+          # Find "obvious" year
+          my $cur_yr = (localtime)[5] + 1900;
+          my $m      = $cur_yr % 100;
+          my $tmp    = $yr;
+          $yr += $cur_yr - $m;
+          $m  -= $tmp;
+          $yr += ( $m > 0 ) ? 100 : -100
+              if abs($m) > 50;
+      }
+  
+      # Make sure clock elements are defined
+      $hr  = 0 unless defined($hr);
+      $min = 0 unless defined($min);
+      $sec = 0 unless defined($sec);
+  
+      # Compensate for AM/PM
+      if ($ampm) {
+          $ampm = uc $ampm;
+          $hr   = 0 if $hr == 12 && $ampm eq 'AM';
+          $hr += 12 if $ampm eq 'PM' && $hr != 12;
+      }
+  
+      return ( $yr, $mon, $day, $hr, $min, $sec, $tz )
+          if wantarray;
+  
+      if ( defined $tz ) {
+          $tz = "Z" if $tz =~ /^(GMT|UTC?|[-+]?0+)$/;
+      }
+      else {
+          $tz = "";
+      }
+      return sprintf(
+          "%04d-%02d-%02d %02d:%02d:%02d%s",
+          $yr, $mon, $day, $hr, $min, $sec, $tz
+      );
+  }
+  
+  sub time2iso (;$) {
+      my $time = shift;
+      $time = time unless defined $time;
+      my ( $sec, $min, $hour, $mday, $mon, $year ) = localtime($time);
+      sprintf(
+          "%04d-%02d-%02d %02d:%02d:%02d",
+          $year + 1900, $mon + 1, $mday, $hour, $min, $sec
+      );
+  }
+  
+  sub time2isoz (;$) {
+      my $time = shift;
+      $time = time unless defined $time;
+      my ( $sec, $min, $hour, $mday, $mon, $year ) = gmtime($time);
+      sprintf(
+          "%04d-%02d-%02d %02d:%02d:%02dZ",
+          $year + 1900, $mon + 1, $mday, $hour, $min, $sec
+      );
+  }
+  
+  1;
+  
+  # ABSTRACT: HTTP::Date - date conversion routines
+  #
+  
+  __END__
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Date - HTTP::Date - date conversion routines
+  
+  =head1 VERSION
+  
+  version 6.05
+  
+  =head1 SYNOPSIS
+  
+   use HTTP::Date;
+  
+   $string = time2str($time);    # Format as GMT ASCII time
+   $time = str2time($string);    # convert ASCII date to machine time
+  
+  =head1 DESCRIPTION
+  
+  This module provides functions that deal the date formats used by the
+  HTTP protocol (and then some more).  Only the first two functions,
+  time2str() and str2time(), are exported by default.
+  
+  =over 4
+  
+  =item time2str( [$time] )
+  
+  The time2str() function converts a machine time (seconds since epoch)
+  to a string.  If the function is called without an argument or with an
+  undefined argument, it will use the current time.
+  
+  The string returned is in the format preferred for the HTTP protocol.
+  This is a fixed length subset of the format defined by RFC 1123,
+  represented in Universal Time (GMT).  An example of a time stamp
+  in this format is:
+  
+     Sun, 06 Nov 1994 08:49:37 GMT
+  
+  =item str2time( $str [, $zone] )
+  
+  The str2time() function converts a string to machine time.  It returns
+  C<undef> if the format of $str is unrecognized, otherwise whatever the
+  C<Time::Local> functions can make out of the parsed time.  Dates
+  before the system's epoch may not work on all operating systems.  The
+  time formats recognized are the same as for parse_date().
+  
+  The function also takes an optional second argument that specifies the
+  default time zone to use when converting the date.  This parameter is
+  ignored if the zone is found in the date string itself.  If this
+  parameter is missing, and the date string format does not contain any
+  zone specification, then the local time zone is assumed.
+  
+  If the zone is not "C<GMT>" or numerical (like "C<-0800>" or
+  "C<+0100>"), then the C<Time::Zone> module must be installed in order
+  to get the date recognized.
+  
+  =item parse_date( $str )
+  
+  This function will try to parse a date string, and then return it as a
+  list of numerical values followed by a (possible undefined) time zone
+  specifier; ($year, $month, $day, $hour, $min, $sec, $tz).  The $year
+  will be the full 4-digit year, and $month numbers start with 1 (for January).
+  
+  In scalar context the numbers are interpolated in a string of the
+  "YYYY-MM-DD hh:mm:ss TZ"-format and returned.
+  
+  If the date is unrecognized, then the empty list is returned (C<undef> in
+  scalar context).
+  
+  The function is able to parse the following formats:
+  
+   "Wed, 09 Feb 1994 22:23:32 GMT"       -- HTTP format
+   "Thu Feb  3 17:03:55 GMT 1994"        -- ctime(3) format
+   "Thu Feb  3 00:00:00 1994",           -- ANSI C asctime() format
+   "Tuesday, 08-Feb-94 14:15:29 GMT"     -- old rfc850 HTTP format
+   "Tuesday, 08-Feb-1994 14:15:29 GMT"   -- broken rfc850 HTTP format
+  
+   "03/Feb/1994:17:03:55 -0700"   -- common logfile format
+   "09 Feb 1994 22:23:32 GMT"     -- HTTP format (no weekday)
+   "08-Feb-94 14:15:29 GMT"       -- rfc850 format (no weekday)
+   "08-Feb-1994 14:15:29 GMT"     -- broken rfc850 format (no weekday)
+  
+   "1994-02-03 14:15:29 -0100"    -- ISO 8601 format
+   "1994-02-03 14:15:29"          -- zone is optional
+   "1994-02-03"                   -- only date
+   "1994-02-03T14:15:29"          -- Use T as separator
+   "19940203T141529Z"             -- ISO 8601 compact format
+   "19940203"                     -- only date
+  
+   "08-Feb-94"         -- old rfc850 HTTP format    (no weekday, no time)
+   "08-Feb-1994"       -- broken rfc850 HTTP format (no weekday, no time)
+   "09 Feb 1994"       -- proposed new HTTP format  (no weekday, no time)
+   "03/Feb/1994"       -- common logfile format     (no time, no offset)
+  
+   "Feb  3  1994"      -- Unix 'ls -l' format
+   "Feb  3 17:03"      -- Unix 'ls -l' format
+  
+   "11-15-96  03:52PM" -- Windows 'dir' format
+  
+  The parser ignores leading and trailing whitespace.  It also allow the
+  seconds to be missing and the month to be numerical in most formats.
+  
+  If the year is missing, then we assume that the date is the first
+  matching date I<before> current month.  If the year is given with only
+  2 digits, then parse_date() will select the century that makes the
+  year closest to the current date.
+  
+  =item time2iso( [$time] )
+  
+  Same as time2str(), but returns a "YYYY-MM-DD hh:mm:ss"-formatted
+  string representing time in the local time zone.
+  
+  =item time2isoz( [$time] )
+  
+  Same as time2str(), but returns a "YYYY-MM-DD hh:mm:ssZ"-formatted
+  string representing Universal Time.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<perlfunc/time>, L<Time::Zone>
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1995-2019 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+HTTP_DATE
+
 $fatpacked{"HTTP/Entity/Parser.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_ENTITY_PARSER';
   package HTTP::Entity::Parser;
   
@@ -4191,6 +4868,436 @@ $fatpacked{"HTTP/MultiPartParser.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\
   1;
 HTTP_MULTIPARTPARSER
 
+$fatpacked{"HTTP/Parser.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_PARSER';
+  =head1 NAME
+  
+  HTTP::Parser - parse HTTP/1.1 request into HTTP::Request/Response object
+  
+  =head1 SYNOPSIS
+  
+   my $parser = HTTP::Parser->new();
+  
+   ...
+  
+   my $status = $parser->add($text);
+  
+   if(0 == $status) {
+     print "request: ".$parser->request()->as_string();  # HTTP::Request
+   } elsif(-3 == $status) {
+     print "no content length header!\n";
+   } elsif(-2 == $status) {
+     print "need a line of data\n";
+   } elsif(-1 == $status) {
+     print "need more data\n";
+   } else {  # $status > 0
+     print "need $status byte(s)\n";
+   }
+  
+  =head1 DESCRIPTION
+  
+  This is an HTTP request parser.  It takes chunks of text as received and
+  returns a 'hint' as to what is required, or returns the HTTP::Request when
+  a complete request has been read.  HTTP/1.1 chunking is supported.  It dies
+  if it finds an error.
+  
+  =cut
+  use 5.006_001;
+  use strict;
+  
+  package HTTP::Parser;
+  
+  our $VERSION = '0.06';
+  
+  use HTTP::Request;
+  use HTTP::Response;
+  use URI;
+  
+  # token is (RFC 2616, ASCII)
+  my $Token =
+   qr/[\x21\x23-\x27\x2a\x2b\x2d\x2e\x30-\x39\x41-\x5a\x5e-\x7a\x7c\x7e]+/;
+  
+  
+  =head2 new ( named params... )
+  
+  Create a new HTTP::Parser object.  Takes named parameters, e.g.:
+  
+   my $parser = HTTP::Parser->new(request => 1);
+  
+  =over 4
+  
+  =item request
+  
+  Allows or denies parsing an HTTP request and returning an C<HTTP::Request>
+  object.
+  
+  =item response
+  
+  Allows or denies parsing an HTTP response and returning an C<HTTP::Response>
+  object.
+  
+  =back
+  
+  If you pass neither C<request> nor C<response>, only requests are parsed (for
+  backwards compatibility); if you pass either, the other defaults to false
+  (disallowing both requests and responses is a fatal error).
+  
+  =cut
+  sub new {
+    my ($class, %p) = @_;
+    $p{request} = 1 unless exists $p{response} or exists $p{request};
+    die 'must allow request or response to be parsed'
+     unless $p{request} or $p{response};
+    @p{qw(state data)} = ('blank', '');
+    my $self = bless \%p, ref $class || $class;
+    return $self;
+  }
+  
+  
+  =head2 add ( string )
+  
+  Parse request.  Returns:
+  
+  =over 8
+  
+  =item  0
+  
+  if finished (call C<object> to get an HTTP::Request or Response object)
+  
+  =item -1
+  
+  if not finished but not sure how many bytes remain
+  
+  =item -2
+  
+  if waiting for a line (like 0 with a hint)
+  
+  =item -3
+  
+  if there was no content-length header, so we can't tell whether we are 
+  waiting for more data or not.
+  
+  If you are reading from a TCP stream, you can keep adding data until 
+  the connection closes gracefully (the HTTP RFC allows this).
+  
+  If you are reading from a file, you should keep adding until you have 
+  all the data.  
+  
+  Once you have added all data, you may call C<object>.  if you are not 
+  sure whether you have all the data, the HTTP::Response object might be 
+  incomplete.
+  
+  =item count
+  
+  if waiting for that many bytes
+  
+  =back
+  
+  Dies on error.
+  
+  This method of parsing makes it easier to parse a request from an event-based
+  system, on the other hand, it's quite alright to pass in the whole request.
+  Ideally, the first chunk passed in is the header (up to the double newline),
+  then whatever byte counts are requested.
+  
+  When a request object is returned, the X-HTTP-Version header has the HTTP
+  version, the uri() method will always return a URI object, not a string.
+  
+  Note that a nonzero return is just a hint, and any amount of data can be
+  passed in to a subsequent add() call.
+  
+  =cut
+  sub add {
+    my ($self,$s) = @_;
+    $s = '' if not defined $s;
+  
+    $self->{data} .= $s;
+  
+    # pre-header blank lines are allowed (RFC 2616 4.1)
+    if($self->{state} eq 'blank') {
+      $self->{data} =~ s/^(\x0d?\x0a)+//;
+      return -2 unless length $self->{data};
+      $self->{state} = 'header';  # done with blank lines; fall through
+    }
+  
+    # still waiting for the header
+    if($self->{state} eq 'header') {
+      # double line break indicates end of header; parse it
+      if($self->{data} =~ /^(.*?)\x0d?\x0a\x0d?\x0a/s) {
+        return $self->_parse_header(length $1);
+      }
+      return -2;  # still waiting for unknown amount of header lines
+  
+    # waiting for main body of request
+    } elsif($self->{state} eq 'body') {
+      return $self->_parse_body();
+  
+    # chunked data
+    } elsif($self->{state} eq 'chunked') {
+      return $self->_parse_chunk();
+  
+    # trailers
+    } elsif($self->{state} eq 'trailer') {
+      # double line break indicates end of trailer; parse it
+      return $self->_parse_header(length $1,1)
+       if $self->{data} =~ /^(.*?)\x0d?\x0a\x0d?\x0a/s;
+      return -1;  # still waiting for unknown amount of trailer data
+    }
+  
+    die "unknown state '$self->{state}'";
+  }
+  
+  
+  =head2 data
+  
+  Returns current data not parsed.  Mainly useful after a request has been
+  parsed.  The data is not removed from the object's buffer, and will be
+  seen before the data next passed to add().
+  
+  =cut
+  sub data {
+    shift->{data}
+  }
+  
+  
+  =head2 extra
+  
+  Returns the count of extra bytes (length of data()) after a request.
+  
+  =cut
+  sub extra {
+    length shift->{data}
+  }
+  
+  
+  =head2 object
+  
+  Returns the object request.  Only useful after the parse has completed.
+  
+  =cut
+  sub object {
+    shift->{obj}
+  }
+  
+  # keep this for compatibility with 0.02
+  sub request {
+    shift->{obj}
+  }
+  
+  
+  # _parse_header ( position of double newline in data [, trailer flag] )
+  #
+  # helper for parse that parses an HTTP header
+  # prerequisite: we have data up to a double newline in $self->{data}
+  # if the trailer flag is set, we're parsing trailers
+  #
+  sub _parse_header {
+    my ($self,$eoh,$trailer) = @_;
+    my $header = substr($self->{data},0,$eoh,'');
+    $self->{data} =~ s/^\x0d?\x0a\x0d?\x0a//;
+  
+    # parse into lines
+    my @header = split /\x0d?\x0a/,$header;
+    my $request = shift @header unless $trailer;
+  
+    # join folded lines
+    my @out;
+    for(@header) {
+      if(s/^[ \t]+//) {
+        die 'LWS on first header line' unless @out;
+        $out[-1] .= $_;
+      } else {
+        push @out, $_;
+      }
+    }
+  
+    # parse request or response line
+    my $obj;
+    unless($trailer) {
+      my ($major, $minor);
+  
+      # is it an HTTP response?
+      if ($request =~ /^HTTP\/(\d+)\.(\d+)/i) {
+        die 'HTTP responses not allowed' unless $self->{response};
+        ($major,$minor) = ($1,$2);
+        $request =~ /^HTTP\/\d+\.\d+ (\d+) (.+)$/;
+        my $state = $1;
+        my $msg = $2;
+        $obj = $self->{obj} = HTTP::Response->new($state, $msg);
+  
+      # perhaps a request?
+      } else {
+        my ($method,$uri,$http) = split / /,$request;
+        die "'$request' is not the start of a valid HTTP request or response"
+         unless $http and $http =~ /^HTTP\/(\d+)\.(\d+)$/i;
+        ($major,$minor) = ($1,$2);
+        die 'HTTP requests not allowed' unless $self->{request};
+  
+        # If the Request-URI is an abs_path, we need to tell URI that we don't
+        # know the scheme, otherwise it will misinterpret paths that start with
+        # // as being scheme-relative uris, and will interpret the first
+        # component after // as the host (see rfc 2616)
+        $uri = "//$uri" if $uri =~ m(^/);
+        $obj = $self->{obj} = HTTP::Request->new($method, URI->new($uri));
+      }
+  
+      $obj->header(X_HTTP_Version => "$major.$minor");  # pseudo-header
+  
+    # we've already seen the initial line and created the object
+    } else {
+      $obj = $self->{obj};
+    }
+  
+    # import headers
+    my $token = qr/[^][\x00-\x1f\x7f()<>@,;:\\"\/?={} \t]+/;
+    for $header(@header) {
+      die "bad header name in '$header'" unless $header =~ s/^($token):[\t ]*//;
+      $obj->push_header($1 => $header);
+    }
+  
+    # if we're parsing trailers we don't need to look at content
+    return 0 if $trailer;
+  
+    # see what sort of content we have, if any
+    if(my $length = $obj->header('content_length')) {
+      s/^\s+//, s/\s+$// for $length;
+      die "bad content-length '$length'" unless $length =~ /^(\d+)$/;
+      $self->{state} = 'body';
+      return $self->_parse_body();
+    }
+  
+    # check for transfer-encoding, and handle chunking
+    if(my @te = $obj->header('transfer_encoding')) {
+      if(grep { lc $_ eq 'chunked' } @te) {
+        $self->{state} = 'chunked';
+        return $self->_parse_chunk();
+      }
+    }
+  
+    # section 14.13 of the spec says an HTTP response "SHOULD" return a 
+    # content-length header unless there are reasons not to
+    # however, the same RFC does allow "end of connection" as a valid marker
+    # of the end of data and means the server does not need to set a content
+    # length header.  the only status codes that "MAY NOT" return data are
+    # 1xx, 204 and 304.
+    # therefore if there is no content length header, return -3 to the caller
+    # so they can decide whether to keep feeding data.  if using HTTP::Parser
+    # with data from tcp, you could assume that the end of a connection is
+    # the end of the response data
+    if($self->{response}) {
+      if (!defined $obj->header('content_length') &&
+       $self->object->code ne '204' &&
+       $self->object->code ne '304' &&
+       $self->object->code !~ /1\d\d/) {
+  
+        # Assume headers are finished and we are moving into body mode
+        $self->{state} = 'body';
+        $self->{no_content_length} = 1;
+  
+        # Parse any data that might be left
+        return $self->_parse_body() if length $self->data;
+        return -3;
+      }
+    }
+  
+    # else we have no content so return success
+    return 0;
+  }
+  
+  
+  # _parse_body
+  #
+  # helper for parse, returns request object with content if done, else
+  # count of bytes remaining
+  #
+  sub _parse_body {
+    my $self = shift;
+    my $length = $self->{obj}->header('content_length');
+  
+    # if the server didn't include a content length header, inform the
+    # caller.  they may choose to ignore this response or wait for
+    # the end of connection (which is a valid reason to assume that
+    # the response is finished)
+    if($self->{no_content_length}) {
+      $self->{obj}->content($self->{data});
+      return -3;
+    }
+  
+    if(length $self->{data} >= $length) {
+      $self->{obj}->content(substr($self->{data},0,$length,''));
+      return 0;
+    }
+    return $length-length $self->{data};
+  }
+  
+  
+  # _parse_chunk
+  #
+  # helper for parse, parse chunked transfer-encoded message; returns like parse
+  #
+  sub _parse_chunk {
+    my $self = shift;
+  
+  CHUNK:
+  
+    # need beginning of chunk with size
+    if(not $self->{chunk}) {
+      if($self->{data} =~ s/^([0-9a-fA-F]+)[^\x0d\x0a]*?\x0d?\x0a//) {
+  
+        # a zero-size chunk marks the end
+        unless($self->{chunk} = hex $1) {
+          $self->{state} = 'trailer';
+  
+          # double line break indicates end of trailer; parse it
+          $self->{data} = "\x0d\x0a".$self->{data};  # count previous line break
+          return $self->_parse_header(length $1,1)
+           if $self->{data} =~ /^(.*?)\x0d?\x0a\x0d?\x0a/s;
+          return -1;  # still waiting for unknown amount of trailer data
+        }
+  
+      } else {
+        die "expected chunked encoding, got '".substr($self->{data},0,40)."...'"
+         if $self->{data} =~ /\x0d?\x0a/;
+        return -2;  # waiting for a line with chunk information
+      }
+    }
+  
+    # do we have a current chunk size?
+    if($self->{chunk}) {
+  
+      # do we have enough data to fill it, plus a CR LF?
+      if(length $self->{data} > $self->{chunk} and
+       substr($self->{data},$self->{chunk},2) =~ /^(\x0d?\x0a)/) {
+        my $crlf = $1;
+        $self->{obj}->add_content(substr($self->{data},0,$self->{chunk}));
+        substr($self->{data},0,length $crlf) = '';
+  
+        # remove data from the buffer that we've already parsed
+        $self->{data} = substr($self->{data},delete $self->{chunk});
+  
+        # got chunks?
+        goto CHUNK;
+      }
+  
+      return $self->{chunk}-length($self->{data})+2;  # extra CR LF
+    }
+  }
+  
+  
+  =head1 AUTHOR
+  
+  David Robins E<lt>dbrobins@davidrobins.netE<gt>
+  Fixes for 0.05 by David Cannings E<lt>david@edeca.netE<gt>
+  
+  =head1 SEE ALSO
+  
+  L<HTTP::Request>, L<HTTP::Response>.
+  
+  =cut
+  
+  
+  1;
+HTTP_PARSER
+
 $fatpacked{"HTTP/Server/PSGI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_SERVER_PSGI';
   package HTTP::Server::PSGI;
   use strict;
@@ -4572,6 +5679,390 @@ $fatpacked{"HTTP/Server/PSGI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<
   =cut
 HTTP_SERVER_PSGI
 
+$fatpacked{"HTTP/Status.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_STATUS';
+  package HTTP::Status;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  use Exporter 5.57 'import';
+  
+  our @EXPORT = qw(is_info is_success is_redirect is_error status_message);
+  our @EXPORT_OK = qw(is_client_error is_server_error is_cacheable_by_default status_constant_name);
+  
+  # Note also addition of mnemonics to @EXPORT below
+  
+  # Unmarked codes are from RFC 7231 (2017-12-20)
+  # See also:
+  # https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml
+  
+  my %StatusCode = (
+      100 => 'Continue',
+      101 => 'Switching Protocols',
+      102 => 'Processing',                      # RFC 2518: WebDAV
+      103 => 'Early Hints',                     # RFC 8297: Indicating Hints
+  #   104 .. 199
+      200 => 'OK',
+      201 => 'Created',
+      202 => 'Accepted',
+      203 => 'Non-Authoritative Information',
+      204 => 'No Content',
+      205 => 'Reset Content',
+      206 => 'Partial Content',                 # RFC 7233: Range Requests
+      207 => 'Multi-Status',                    # RFC 4918: WebDAV
+      208 => 'Already Reported',                # RFC 5842: WebDAV bindings
+  #   209 .. 225
+      226 => 'IM Used',                         # RFC 3229: Delta encoding
+  #   227 .. 299
+      300 => 'Multiple Choices',
+      301 => 'Moved Permanently',
+      302 => 'Found',
+      303 => 'See Other',
+      304 => 'Not Modified',                    # RFC 7232: Conditional Request
+      305 => 'Use Proxy',
+      307 => 'Temporary Redirect',
+      308 => 'Permanent Redirect',              # RFC 7528: Permanent Redirect
+  #   309 .. 399
+      400 => 'Bad Request',
+      401 => 'Unauthorized',                    # RFC 7235: Authentication
+      402 => 'Payment Required',
+      403 => 'Forbidden',
+      404 => 'Not Found',
+      405 => 'Method Not Allowed',
+      406 => 'Not Acceptable',
+      407 => 'Proxy Authentication Required',   # RFC 7235: Authentication
+      408 => 'Request Timeout',
+      409 => 'Conflict',
+      410 => 'Gone',
+      411 => 'Length Required',
+      412 => 'Precondition Failed',             # RFC 7232: Conditional Request
+      413 => 'Payload Too Large',
+      414 => 'URI Too Long',
+      415 => 'Unsupported Media Type',
+      416 => 'Range Not Satisfiable',           # RFC 7233: Range Requests
+      417 => 'Expectation Failed',
+  #   418 .. 420
+      421 => 'Misdirected Request',             # RFC 7540: HTTP/2
+      422 => 'Unprocessable Entity',            # RFC 4918: WebDAV
+      423 => 'Locked',                          # RFC 4918: WebDAV
+      424 => 'Failed Dependency',               # RFC 4918: WebDAV
+      425 => 'Too Early',                       # RFC 8470: Using Early Data in HTTP
+      426 => 'Upgrade Required',
+  #   427
+      428 => 'Precondition Required',           # RFC 6585: Additional Codes
+      429 => 'Too Many Requests',               # RFC 6585: Additional Codes
+  #   430
+      431 => 'Request Header Fields Too Large', # RFC 6585: Additional Codes
+  #   432 .. 450
+      451 => 'Unavailable For Legal Reasons',   # RFC 7725: Legal Obstacles
+  #   452 .. 499
+      500 => 'Internal Server Error',
+      501 => 'Not Implemented',
+      502 => 'Bad Gateway',
+      503 => 'Service Unavailable',
+      504 => 'Gateway Timeout',
+      505 => 'HTTP Version Not Supported',
+      506 => 'Variant Also Negotiates',         # RFC 2295: Transparant Ngttn
+      507 => 'Insufficient Storage',            # RFC 4918: WebDAV
+      508 => 'Loop Detected',                   # RFC 5842: WebDAV bindings
+  #   509
+      510 => 'Not Extended',                    # RFC 2774: Extension Framework
+      511 => 'Network Authentication Required', # RFC 6585: Additional Codes
+  );
+  
+  my %StatusCodeName;
+  
+  # keep some unofficial codes that used to be in this distribution
+  %StatusCode = (
+      %StatusCode,
+      418 => 'I\'m a teapot',                   # RFC 2324: HTCPC/1.0  1-april
+      449 => 'Retry with',                      #           microsoft
+      509 => 'Bandwidth Limit Exceeded',        #           Apache / cPanel
+  );
+  
+  my $mnemonicCode = '';
+  my ($code, $message);
+  while (($code, $message) = each %StatusCode) {
+      # create mnemonic subroutines
+      $message =~ s/I'm/I am/;
+      $message =~ tr/a-z \-/A-Z__/;
+      my $constant_name = "HTTP_".$message;
+      $mnemonicCode .= "sub $constant_name () { $code }\n";
+      $mnemonicCode .= "*RC_$message = \\&HTTP_$message;\n";  # legacy
+      $mnemonicCode .= "push(\@EXPORT_OK, 'HTTP_$message');\n";
+      $mnemonicCode .= "push(\@EXPORT, 'RC_$message');\n";
+      $StatusCodeName{$code} = $constant_name
+  }
+  eval $mnemonicCode; # only one eval for speed
+  die if $@;
+  
+  # backwards compatibility
+  *RC_MOVED_TEMPORARILY = \&RC_FOUND;  # 302 was renamed in the standard
+  push(@EXPORT, "RC_MOVED_TEMPORARILY");
+  
+  my %compat = (
+      REQUEST_ENTITY_TOO_LARGE      => \&HTTP_PAYLOAD_TOO_LARGE,
+      REQUEST_URI_TOO_LARGE         => \&HTTP_URI_TOO_LONG,
+      REQUEST_RANGE_NOT_SATISFIABLE => \&HTTP_RANGE_NOT_SATISFIABLE,
+      NO_CODE                       => \&HTTP_TOO_EARLY,
+      UNORDERED_COLLECTION          => \&HTTP_TOO_EARLY,
+  );
+  
+  foreach my $name (keys %compat) {
+      push(@EXPORT, "RC_$name");
+      push(@EXPORT_OK, "HTTP_$name");
+      no strict 'refs';
+      *{"RC_$name"} = $compat{$name};
+      *{"HTTP_$name"} = $compat{$name};
+  }
+  
+  our %EXPORT_TAGS = (
+     constants => [grep /^HTTP_/, @EXPORT_OK],
+     is => [grep /^is_/, @EXPORT, @EXPORT_OK],
+  );
+  
+  
+  sub status_message  ($) { $StatusCode{$_[0]}; }
+  sub status_constant_name ($) {
+      exists($StatusCodeName{$_[0]}) ? $StatusCodeName{$_[0]} : undef;
+  }
+  
+  sub is_info                 ($) { $_[0] && $_[0] >= 100 && $_[0] < 200; }
+  sub is_success              ($) { $_[0] && $_[0] >= 200 && $_[0] < 300; }
+  sub is_redirect             ($) { $_[0] && $_[0] >= 300 && $_[0] < 400; }
+  sub is_error                ($) { $_[0] && $_[0] >= 400 && $_[0] < 600; }
+  sub is_client_error         ($) { $_[0] && $_[0] >= 400 && $_[0] < 500; }
+  sub is_server_error         ($) { $_[0] && $_[0] >= 500 && $_[0] < 600; }
+  sub is_cacheable_by_default ($) { $_[0] && ( $_[0] == 200 # OK
+                                            || $_[0] == 203 # Non-Authoritative Information
+                                            || $_[0] == 204 # No Content
+                                            || $_[0] == 206 # Not Acceptable
+                                            || $_[0] == 300 # Multiple Choices
+                                            || $_[0] == 301 # Moved Permanently
+                                            || $_[0] == 308 # Permanent Redirect
+                                            || $_[0] == 404 # Not Found
+                                            || $_[0] == 405 # Method Not Allowed
+                                            || $_[0] == 410 # Gone
+                                            || $_[0] == 414 # Request-URI Too Large
+                                            || $_[0] == 451 # Unavailable For Legal Reasons
+                                            || $_[0] == 501 # Not Implemented
+                                              );
+  }
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Status - HTTP Status code processing
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 SYNOPSIS
+  
+   use HTTP::Status qw(:constants :is status_message);
+  
+   if ($rc != HTTP_OK) {
+       print status_message($rc), "\n";
+   }
+  
+   if (is_success($rc)) { ... }
+   if (is_error($rc)) { ... }
+   if (is_redirect($rc)) { ... }
+  
+  =head1 DESCRIPTION
+  
+  I<HTTP::Status> is a library of routines for defining and
+  classifying HTTP status codes for libwww-perl.  Status codes are
+  used to encode the overall outcome of an HTTP response message.  Codes
+  correspond to those defined in RFC 2616 and RFC 2518.
+  
+  =head1 CONSTANTS
+  
+  The following constant functions can be used as mnemonic status code
+  names.  None of these are exported by default.  Use the C<:constants>
+  tag to import them all.
+  
+     HTTP_CONTINUE                        (100)
+     HTTP_SWITCHING_PROTOCOLS             (101)
+     HTTP_PROCESSING                      (102)
+     HTTP_EARLY_HINTS                     (103)
+  
+     HTTP_OK                              (200)
+     HTTP_CREATED                         (201)
+     HTTP_ACCEPTED                        (202)
+     HTTP_NON_AUTHORITATIVE_INFORMATION   (203)
+     HTTP_NO_CONTENT                      (204)
+     HTTP_RESET_CONTENT                   (205)
+     HTTP_PARTIAL_CONTENT                 (206)
+     HTTP_MULTI_STATUS                    (207)
+     HTTP_ALREADY_REPORTED                (208)
+  
+     HTTP_IM_USED                         (226)
+  
+     HTTP_MULTIPLE_CHOICES                (300)
+     HTTP_MOVED_PERMANENTLY               (301)
+     HTTP_FOUND                           (302)
+     HTTP_SEE_OTHER                       (303)
+     HTTP_NOT_MODIFIED                    (304)
+     HTTP_USE_PROXY                       (305)
+     HTTP_TEMPORARY_REDIRECT              (307)
+     HTTP_PERMANENT_REDIRECT              (308)
+  
+     HTTP_BAD_REQUEST                     (400)
+     HTTP_UNAUTHORIZED                    (401)
+     HTTP_PAYMENT_REQUIRED                (402)
+     HTTP_FORBIDDEN                       (403)
+     HTTP_NOT_FOUND                       (404)
+     HTTP_METHOD_NOT_ALLOWED              (405)
+     HTTP_NOT_ACCEPTABLE                  (406)
+     HTTP_PROXY_AUTHENTICATION_REQUIRED   (407)
+     HTTP_REQUEST_TIMEOUT                 (408)
+     HTTP_CONFLICT                        (409)
+     HTTP_GONE                            (410)
+     HTTP_LENGTH_REQUIRED                 (411)
+     HTTP_PRECONDITION_FAILED             (412)
+     HTTP_PAYLOAD_TOO_LARGE               (413)
+     HTTP_URI_TOO_LONG                    (414)
+     HTTP_UNSUPPORTED_MEDIA_TYPE          (415)
+     HTTP_RANGE_NOT_SATISFIABLE           (416)
+     HTTP_EXPECTATION_FAILED              (417)
+     HTTP_MISDIRECTED REQUEST             (421)
+     HTTP_UNPROCESSABLE_ENTITY            (422)
+     HTTP_LOCKED                          (423)
+     HTTP_FAILED_DEPENDENCY               (424)
+     HTTP_TOO_EARLY                       (425)
+     HTTP_UPGRADE_REQUIRED                (426)
+     HTTP_PRECONDITION_REQUIRED           (428)
+     HTTP_TOO_MANY_REQUESTS               (429)
+     HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE (431)
+     HTTP_UNAVAILABLE_FOR_LEGAL_REASONS   (451)
+  
+     HTTP_INTERNAL_SERVER_ERROR           (500)
+     HTTP_NOT_IMPLEMENTED                 (501)
+     HTTP_BAD_GATEWAY                     (502)
+     HTTP_SERVICE_UNAVAILABLE             (503)
+     HTTP_GATEWAY_TIMEOUT                 (504)
+     HTTP_HTTP_VERSION_NOT_SUPPORTED      (505)
+     HTTP_VARIANT_ALSO_NEGOTIATES         (506)
+     HTTP_INSUFFICIENT_STORAGE            (507)
+     HTTP_LOOP_DETECTED                   (508)
+     HTTP_NOT_EXTENDED                    (510)
+     HTTP_NETWORK_AUTHENTICATION_REQUIRED (511)
+  
+  =head1 FUNCTIONS
+  
+  The following additional functions are provided.  Most of them are
+  exported by default.  The C<:is> import tag can be used to import all
+  the classification functions.
+  
+  =over 4
+  
+  =item status_message( $code )
+  
+  The status_message() function will translate status codes to human
+  readable strings. The string is the same as found in the constant
+  names above.
+  For example, C<status_message(303)> will return C<"Not Found">.
+  
+  If the $code is not registered in the L<list of IANA HTTP Status
+  Codes|https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml>
+  then C<undef> is returned.
+  
+  =item status_constant_name( $code )
+  
+  The status_constant_name() function will translate a status code
+  to a string which has the name of the constant for that status code.
+  For example, C<status_constant_name(404)> will return C<"HTTP_NOT_FOUND">.
+  
+  If the C<$code> is not registered in the L<list of IANA HTTP Status
+  Codes|https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml>
+  then C<undef> is returned.
+  
+  =item is_info( $code )
+  
+  Return TRUE if C<$code> is an I<Informational> status code (1xx).  This
+  class of status code indicates a provisional response which can't have
+  any content.
+  
+  =item is_success( $code )
+  
+  Return TRUE if C<$code> is a I<Successful> status code (2xx).
+  
+  =item is_redirect( $code )
+  
+  Return TRUE if C<$code> is a I<Redirection> status code (3xx). This class of
+  status code indicates that further action needs to be taken by the
+  user agent in order to fulfill the request.
+  
+  =item is_error( $code )
+  
+  Return TRUE if C<$code> is an I<Error> status code (4xx or 5xx).  The function
+  returns TRUE for both client and server error status codes.
+  
+  =item is_client_error( $code )
+  
+  Return TRUE if C<$code> is a I<Client Error> status code (4xx). This class
+  of status code is intended for cases in which the client seems to have
+  erred.
+  
+  This function is B<not> exported by default.
+  
+  =item is_server_error( $code )
+  
+  Return TRUE if C<$code> is a I<Server Error> status code (5xx). This class
+  of status codes is intended for cases in which the server is aware
+  that it has erred or is incapable of performing the request.
+  
+  This function is B<not> exported by default.
+  
+  =item is_cacheable_by_default( $code )
+  
+  Return TRUE if C<$code> indicates that a response is cacheable by default, and
+  it can be reused by a cache with heuristic expiration. All other status codes
+  are not cacheable by default. See L<RFC 7231 - HTTP/1.1 Semantics and Content,
+  Section 6.1. Overview of Status Codes|https://tools.ietf.org/html/rfc7231#section-6.1>.
+  
+  This function is B<not> exported by default.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<IANA HTTP Status Codes|https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml>
+  
+  =head1 BUGS
+  
+  For legacy reasons all the C<HTTP_> constants are exported by default
+  with the prefix C<RC_>.  It's recommended to use explicit imports and
+  the C<:constants> tag instead of relying on this.
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: HTTP Status code processing
+HTTP_STATUS
+
 $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_TINY';
   # vim: ts=4 sts=4 sw=4 et:
   package HTTP::Tiny;
@@ -4579,7 +6070,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   use warnings;
   # ABSTRACT: A small, simple, correct HTTP/1.1 client
   
-  our $VERSION = '0.082';
+  our $VERSION = '0.084';
   
   sub _croak { require Carp; Carp::croak(@_) }
   
@@ -4615,10 +6106,15 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   #pod * C<timeout> — Request timeout in seconds (default is 60) If a socket open,
   #pod   read or write takes longer than the timeout, the request response status code
   #pod   will be 599.
-  #pod * C<verify_SSL> — A boolean that indicates whether to validate the SSL
-  #pod   certificate of an C<https> — connection (default is false)
+  #pod * C<verify_SSL> — A boolean that indicates whether to validate the TLS/SSL
+  #pod   certificate of an C<https> — connection (default is true). Changed from false
+  #pod   to true in version 0.083.
   #pod * C<SSL_options> — A hashref of C<SSL_*> — options to pass through to
   #pod   L<IO::Socket::SSL>
+  #pod * C<$ENV{PERL_HTTP_TINY_SSL_INSECURE_BY_DEFAULT}> - Changes the default
+  #pod   certificate verification behavior to not check server identity if set to 1.
+  #pod   Only effective if C<verify_SSL> is not set. Added in version 0.083.
+  #pod
   #pod
   #pod An accessor/mutator method exists for each attribute.
   #pod
@@ -4686,11 +6182,17 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   sub new {
       my($class, %args) = @_;
   
+      # Support lower case verify_ssl argument, but only if verify_SSL is not
+      # true.
+      if ( exists $args{verify_ssl} ) {
+          $args{verify_SSL}  ||= $args{verify_ssl};
+      }
+  
       my $self = {
           max_redirect => 5,
           timeout      => defined $args{timeout} ? $args{timeout} : 60,
           keep_alive   => 1,
-          verify_SSL   => $args{verify_SSL} || $args{verify_ssl} || 0, # no verification by default
+          verify_SSL   => defined $args{verify_SSL} ? $args{verify_SSL} : _verify_SSL_default(),
           no_proxy     => $ENV{no_proxy},
       };
   
@@ -4707,6 +6209,13 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
       $self->_set_proxies;
   
       return $self;
+  }
+  
+  sub _verify_SSL_default {
+      my ($self) = @_;
+      # Check if insecure default certificate verification behaviour has been
+      # changed by the user by setting PERL_HTTP_TINY_SSL_INSECURE_BY_DEFAULT=1
+      return (($ENV{PERL_HTTP_TINY_INSECURE_BY_DEFAULT} || '') eq '1') ? 0 : 1;
   }
   
   sub _set_proxies {
@@ -5635,7 +7144,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
           timeout          => 60,
           max_line_size    => 16384,
           max_header_lines => 64,
-          verify_SSL       => 0,
+          verify_SSL       => HTTP::Tiny::_verify_SSL_default(),
           SSL_options      => {},
           %args
       }, $class;
@@ -6284,7 +7793,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =head1 VERSION
   
-  version 0.082
+  version 0.084
   
   =head1 SYNOPSIS
   
@@ -6377,11 +7886,15 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =item *
   
-  C<verify_SSL> — A boolean that indicates whether to validate the SSL certificate of an C<https> — connection (default is false)
+  C<verify_SSL> — A boolean that indicates whether to validate the TLS/SSL certificate of an C<https> — connection (default is true). Changed from false to true in version 0.083.
   
   =item *
   
   C<SSL_options> — A hashref of C<SSL_*> — options to pass through to L<IO::Socket::SSL>
+  
+  =item *
+  
+  C<$ENV{PERL_HTTP_TINY_SSL_INSECURE_BY_DEFAULT}> - Changes the default certificate verification behavior to not check server identity if set to 1. Only effective if C<verify_SSL> is not set. Added in version 0.083.
   
   =back
   
@@ -6627,11 +8140,11 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   timeout
   verify_SSL
   
-  =head1 SSL SUPPORT
+  =head1 TLS/SSL SUPPORT
   
   Direct C<https> connections are supported only if L<IO::Socket::SSL> 1.56 or
   greater and L<Net::SSLeay> 1.49 or greater are installed. An error will occur
-  if new enough versions of these modules are not installed or if the SSL
+  if new enough versions of these modules are not installed or if the TLS
   encryption fails. You can also use C<HTTP::Tiny::can_ssl()> utility function
   that returns boolean to see if the required modules are installed.
   
@@ -6639,7 +8152,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   command (i.e. RFC 2817).  You may not proxy C<https> via a proxy that itself
   requires C<https> to communicate.
   
-  SSL provides two distinct capabilities:
+  TLS/SSL provides two distinct capabilities:
   
   =over 4
   
@@ -6653,24 +8166,17 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =back
   
-  B<By default, HTTP::Tiny does not verify server identity>.
+  B<By default, HTTP::Tiny verifies server identity>.
   
-  Server identity verification is controversial and potentially tricky because it
-  depends on a (usually paid) third-party Certificate Authority (CA) trust model
-  to validate a certificate as legitimate.  This discriminates against servers
-  with self-signed certificates or certificates signed by free, community-driven
-  CA's such as L<CAcert.org|http://cacert.org>.
+  This was changed in version 0.083 due to security concerns. The previous default
+  behavior can be enabled by setting C<$ENV{PERL_HTTP_TINY_SSL_INSECURE_BY_DEFAULT}>
+  to 1.
   
-  By default, HTTP::Tiny does not make any assumptions about your trust model,
-  threat level or risk tolerance.  It just aims to give you an encrypted channel
-  when you need one.
-  
-  Setting the C<verify_SSL> attribute to a true value will make HTTP::Tiny verify
-  that an SSL connection has a valid SSL certificate corresponding to the host
-  name of the connection and that the SSL certificate has been verified by a CA.
-  Assuming you trust the CA, this will protect against a L<man-in-the-middle
-  attack|http://en.wikipedia.org/wiki/Man-in-the-middle_attack>.  If you are
-  concerned about security, you should enable this option.
+  Verification is done by checking that that the TLS/SSL connection has a valid
+  certificate corresponding to the host name of the connection and that the
+  certificate has been verified by a CA. Assuming you trust the CA, this will
+  protect against L<machine-in-the-middle
+  attacks|http://en.wikipedia.org/wiki/Machine-in-the-middle_attack>.
   
   Certificate verification requires a file containing trusted CA certificates.
   
@@ -6678,9 +8184,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   will try to find a CA certificate file in that location.
   
   If the L<Mozilla::CA> module is installed, HTTP::Tiny will use the CA file
-  included with it as a source of trusted CA's.  (This means you trust Mozilla,
-  the author of Mozilla::CA, the CPAN mirror where you got Mozilla::CA, the
-  toolchain used to install it, and your operating system security, right?)
+  included with it as a source of trusted CA's.
   
   If that module is not available, then HTTP::Tiny will search several
   system-specific default locations for a CA certificate file:
@@ -6699,13 +8203,33 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   /etc/ssl/ca-bundle.pem
   
+  =item *
+  
+  /etc/openssl/certs/ca-certificates.crt
+  
+  =item *
+  
+  /etc/ssl/cert.pem
+  
+  =item *
+  
+  /usr/local/share/certs/ca-root-nss.crt
+  
+  =item *
+  
+  /etc/pki/tls/cacert.pem
+  
+  =item *
+  
+  /etc/certs/ca-certificates.crt
+  
   =back
   
   An error will be occur if C<verify_SSL> is true and no CA certificate file
   is available.
   
-  If you desire complete control over SSL connections, the C<SSL_options> attribute
-  lets you provide a hash reference that will be passed through to
+  If you desire complete control over TLS/SSL connections, the C<SSL_options>
+  attribute lets you provide a hash reference that will be passed through to
   C<IO::Socket::SSL::start_SSL()>, overriding any options set by HTTP::Tiny. For
   example, to provide your own trusted CA file:
   
@@ -6715,7 +8239,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   The C<SSL_options> attribute could also be used for such things as providing a
   client certificate for authentication to a server or controlling the choice of
-  cipher used for the SSL connection. See L<IO::Socket::SSL> documentation for
+  cipher used for the TLS/SSL connection. See L<IO::Socket::SSL> documentation for
   details.
   
   =head1 PROXY SUPPORT
@@ -6921,7 +8445,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =head1 CONTRIBUTORS
   
-  =for stopwords Alan Gardner Alessandro Ghedini A. Sinan Unur Brad Gilbert brian m. carlson Chris Nehren Weyl Claes Jakobsson Clinton Gormley Craig Berry David Golden Mitchell Dean Pearce Edward Zborowski Felipe Gasper Graham Knop Greg Kennedy James E Keenan Raspass Jeremy Mates Jess Robinson Karen Etheridge Lukas Eklund Martin J. Evans Martin-Louis Bright Matthew Horsfall Michael R. Davis Mike Doherty Nicolas Rochelemagne Olaf Alders Olivier Mengué Petr Písař sanjay-cpu Serguei Trouchelle Shoichi Kaji SkyMarshal Sören Kornetzki Steve Grazzini Syohei YOSHIDA Tatsuhiko Miyagawa Tom Hukins Tony Cook Xavier Guimard
+  =for stopwords Alan Gardner Alessandro Ghedini A. Sinan Unur Brad Gilbert brian m. carlson Chris Nehren Weyl Claes Jakobsson Clinton Gormley Craig Berry David Golden Mitchell Dean Pearce Edward Zborowski Felipe Gasper Graham Knop Greg Kennedy James E Keenan Raspass Jeremy Mates Jess Robinson Karen Etheridge Lukas Eklund Martin J. Evans Martin-Louis Bright Matthew Horsfall Michael R. Davis Mike Doherty Nicolas Rochelemagne Olaf Alders Olivier Mengué Petr Písař sanjay-cpu Serguei Trouchelle Shoichi Kaji SkyMarshal Sören Kornetzki Steve Grazzini Stig Palmquist Syohei YOSHIDA Tatsuhiko Miyagawa Tom Hukins Tony Cook Xavier Guimard
   
   =over 4
   
@@ -7083,6 +8607,10 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =item *
   
+  Stig Palmquist <git@stig.io>
+  
+  =item *
+  
   Syohei YOSHIDA <syohex@gmail.com>
   
   =item *
@@ -7105,7 +8633,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =head1 COPYRIGHT AND LICENSE
   
-  This software is copyright (c) 2022 by Christian Hansen.
+  This software is copyright (c) 2023 by Christian Hansen.
   
   This is free software; you can redistribute it and/or modify it under
   the same terms as the Perl 5 programming language system itself.
@@ -8197,6 +9725,382 @@ $fatpacked{"JSON/MaybeXS.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'JS
   
   =cut
 JSON_MAYBEXS
+
+$fatpacked{"Module/Load.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'MODULE_LOAD';
+  package Module::Load;
+  
+  use strict;
+  use warnings;
+  use File::Spec ();
+  
+  our $VERSION = '0.36';
+  
+  
+  sub import {
+      my $who = _who();
+      my $h; shift;
+  
+      {   no strict 'refs';
+  
+          @_ or (
+              *{"${who}::load"} = \&load, # compat to prev version
+              *{"${who}::autoload"} = \&autoload,
+              return
+          );
+  
+          map { $h->{$_} = () if defined $_ } @_;
+  
+          (exists $h->{none} or exists $h->{''})
+              and shift, last;
+  
+          ((exists $h->{autoload} and shift,1) or (exists $h->{all} and shift))
+              and *{"${who}::autoload"} = \&autoload;
+  
+          ((exists $h->{load} and shift,1) or exists $h->{all})
+              and *{"${who}::load"} = \&load;
+  
+          ((exists $h->{load_remote} and shift,1) or exists $h->{all})
+              and *{"${who}::load_remote"} = \&load_remote;
+  
+          ((exists $h->{autoload_remote} and shift,1) or exists $h->{all})
+              and *{"${who}::autoload_remote"} = \&autoload_remote;
+  
+      }
+  
+  }
+  
+  sub load(*;@){
+      goto &_load;
+  }
+  
+  sub autoload(*;@){
+      unshift @_, 'autoimport';
+      goto &_load;
+  }
+  
+  sub load_remote($$;@){
+      my ($dst, $src, @exp) = @_;
+  
+      eval "package $dst;Module::Load::load('$src', qw/@exp/);";
+      $@ && die "$@";
+  }
+  
+  sub autoload_remote($$;@){
+      my ($dst, $src, @exp) = @_;
+  
+      eval "package $dst;Module::Load::autoload('$src', qw/@exp/);";
+      $@ && die "$@";
+  }
+  
+  sub _load{
+      my $autoimport = $_[0] eq 'autoimport' and shift;
+      my $mod = shift or return;
+      my $who = _who();
+  
+      if( _is_file( $mod ) ) {
+          require $mod;
+      } else {
+          LOAD: {
+              my $err;
+              for my $flag ( qw[1 0] ) {
+                  my $file = _to_file( $mod, $flag);
+                  eval { require $file };
+                  $@ ? $err .= $@ : last LOAD;
+              }
+              die $err if $err;
+          }
+      }
+  
+      ### This addresses #41883: Module::Load cannot import
+      ### non-Exporter module. ->import() routines weren't
+      ### properly called when load() was used.
+  
+      {   no strict 'refs';
+          my $import;
+  
+      ((@_ or $autoimport) and (
+          $import = $mod->can('import')
+          ) and (
+          unshift(@_, $mod),
+          goto &$import
+          )
+      );
+      }
+  
+  }
+  
+  sub _to_file{
+      local $_    = shift;
+      my $pm      = shift || '';
+  
+      ## trailing blanks ignored by default. [rt #69886]
+      my @parts = split /::|'/, $_, -1;
+      ## make sure that we can't hop out of @INC
+      shift @parts if @parts && !$parts[0];
+  
+      ### because of [perl #19213], see caveats ###
+      my $file = $^O eq 'MSWin32'
+                      ? join "/", @parts
+                      : File::Spec->catfile( @parts );
+  
+      $file   .= '.pm' if $pm;
+  
+      ### on perl's before 5.10 (5.9.5@31746) if you require
+      ### a file in VMS format, it's stored in %INC in VMS
+      ### format. Therefor, better unixify it first
+      ### Patch in reply to John Malmbergs patch (as mentioned
+      ### above) on p5p Tue 21 Aug 2007 04:55:07
+      $file = VMS::Filespec::unixify($file) if $^O eq 'VMS';
+  
+      return $file;
+  }
+  
+  sub _who { (caller(1))[0] }
+  
+  sub _is_file {
+      local $_ = shift;
+      return  /^\./               ? 1 :
+              /[^\w:']/           ? 1 :
+              undef
+      #' silly bbedit..
+  }
+  
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  Module::Load - runtime require of both modules and files
+  
+  =head1 SYNOPSIS
+  
+    use Module::Load;
+  
+    my $module = 'Data::Dumper';
+  
+    load Data::Dumper;     # loads that module, but not import any functions
+                           # -> cannot use 'Dumper' function
+  
+    load 'Data::Dumper';   # ditto
+    load $module           # tritto
+  
+    autoload Data::Dumper; # loads that module and imports the default functions
+                           # -> can use 'Dumper' function
+  
+    my $script = 'some/script.pl'
+    load $script;
+    load 'some/script.pl';  # use quotes because of punctuations
+  
+    load thing;             # try 'thing' first, then 'thing.pm'
+  
+    load CGI, ':all';       # like 'use CGI qw[:standard]'
+  
+  =head1 DESCRIPTION
+  
+  C<Module::Load> eliminates the need to know whether you are trying
+  to require either a file or a module.
+  
+  If you consult C<perldoc -f require> you will see that C<require> will
+  behave differently when given a bareword or a string.
+  
+  In the case of a string, C<require> assumes you are wanting to load a
+  file. But in the case of a bareword, it assumes you mean a module.
+  
+  This gives nasty overhead when you are trying to dynamically require
+  modules at runtime, since you will need to change the module notation
+  (C<Acme::Comment>) to a file notation fitting the particular platform
+  you are on.
+  
+  C<Module::Load> eliminates the need for this overhead and will
+  just DWYM.
+  
+  =head2 Difference between C<load> and C<autoload>
+  
+  C<Module::Load> imports the two functions - C<load> and C<autoload>
+  
+  C<autoload> imports the default functions automatically,
+  but C<load> do not import any functions.
+  
+  C<autoload> is usable under C<BEGIN{};>.
+  
+  Both the functions can import the functions that are specified.
+  
+  Following codes are same.
+  
+    load File::Spec::Functions, qw/splitpath/;
+  
+    autoload File::Spec::Functions, qw/splitpath/;
+  
+  =head1 FUNCTIONS
+  
+  =over 4
+  
+  =item load
+  
+  Loads a specified module.
+  
+  See L</Rules> for detailed loading rule.
+  
+  =item autoload
+  
+  Loads a specified module and imports the default functions.
+  
+  Except importing the functions, 'autoload' is same as 'load'.
+  
+  =item load_remote
+  
+  Loads a specified module to the specified package.
+  
+    use Module::Load 'load_remote';
+  
+    my $pkg = 'Other::Package';
+  
+    load_remote $pkg, 'Data::Dumper'; # load a module to 'Other::Package'
+                                      # but do not import 'Dumper' function
+  
+  A module for loading must be quoted.
+  
+  Except specifing the package and quoting module name,
+  'load_remote' is same as 'load'.
+  
+  =item autoload_remote
+  
+  Loads a specified module and imports the default functions to the specified package.
+  
+    use Module::Load 'autoload_remote';
+  
+    my $pkg = 'Other::Package';
+  
+    autoload_remote $pkg, 'Data::Dumper'; # load a module to 'Other::Package'
+                                          # and imports 'Dumper' function
+  
+  A module for loading must be quoted.
+  
+  Except specifing the package and quoting module name,
+  'autoload_remote' is same as 'load_remote'.
+  
+  =back
+  
+  =head1 Rules
+  
+  All functions have the following rules to decide what it thinks
+  you want:
+  
+  =over 4
+  
+  =item *
+  
+  If the argument has any characters in it other than those matching
+  C<\w>, C<:> or C<'>, it must be a file
+  
+  =item *
+  
+  If the argument matches only C<[\w:']>, it must be a module
+  
+  =item *
+  
+  If the argument matches only C<\w>, it could either be a module or a
+  file. We will try to find C<file.pm> first in C<@INC> and if that
+  fails, we will try to find C<file> in @INC.  If both fail, we die with
+  the respective error messages.
+  
+  =back
+  
+  =head1 IMPORTS THE FUNCTIONS
+  
+  'load' and 'autoload' are imported by default, but 'load_remote' and
+  'autoload_remote' are not imported.
+  
+  To use 'load_remote' or 'autoload_remote', specify at 'use'.
+  
+  =over 4
+  
+  =item "load","autoload","load_remote","autoload_remote"
+  
+  Imports the selected functions.
+  
+    # imports 'load' and 'autoload' (default)
+    use Module::Load;
+  
+    # imports 'autoload' only
+    use Module::Load 'autoload';
+  
+    # imports 'autoload' and 'autoload_remote', but don't import 'load';
+    use Module::Load qw/autoload autoload_remote/;
+  
+  =item 'all'
+  
+  Imports all the functions.
+  
+    use Module::Load 'all'; # imports load, autoload, load_remote, autoload_remote
+  
+  =item '','none',undef
+  
+  Not import any functions (C<load> and C<autoload> are not imported).
+  
+    use Module::Load '';
+  
+    use Module::Load 'none';
+  
+    use Module::Load undef;
+  
+  =back
+  
+  =head1 Caveats
+  
+  Because of a bug in perl (#19213), at least in version 5.6.1, we have
+  to hardcode the path separator for a require on Win32 to be C</>, like
+  on Unix rather than the Win32 C<\>. Otherwise perl will not read its
+  own %INC accurately double load files if they are required again, or
+  in the worst case, core dump.
+  
+  C<Module::Load> cannot do implicit imports, only explicit imports.
+  (in other words, you always have to specify explicitly what you wish
+  to import from a module, even if the functions are in that modules'
+  C<@EXPORT>)
+  
+  =head1 SEE ALSO
+  
+  L<Module::Runtime> provides functions for loading modules,
+  checking the validity of a module name,
+  converting a module name to partial C<.pm> path,
+  and related utility functions.
+  
+  L<"require" in perlfunc|https://metacpan.org/pod/perlfunc#require>
+  and
+  L<"use" in perlfunc|https://metacpan.org/pod/perlfunc#use>.
+  
+  L<Mojo::Loader> is a "class loader and plugin framework",
+  and is included in the
+  L<Mojolicious|https://metacpan.org/release/Mojolicious> distribution.
+  
+  L<Module::Loader> is a module for finding and loading modules
+  in a given namespace, inspired by C<Mojo::Loader>.
+  
+  
+  =head1 ACKNOWLEDGEMENTS
+  
+  Thanks to Jonas B. Nielsen for making explicit imports work.
+  
+  =head1 BUG REPORTS
+  
+  Please report bugs or other issues to E<lt>bug-module-load@rt.cpan.orgE<gt>.
+  
+  =head1 AUTHOR
+  
+  This module by Jos Boumans E<lt>kane@cpan.orgE<gt>.
+  
+  =head1 COPYRIGHT
+  
+  This library is free software; you may redistribute and/or modify it
+  under the same terms as Perl itself.
+  
+  =cut
+MODULE_LOAD
 
 $fatpacked{"POSIX/strftime/Compiler.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'POSIX_STRFTIME_COMPILER';
   package POSIX::strftime::Compiler;
@@ -13145,7 +15049,7 @@ $fatpacked{"Plack/Handler/Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\
   use strict;
   use warnings;
   
-  our $VERSION = '0.0401';
+  our $VERSION = '0.0402';
   
   use base qw(Thrall::Server);
   
@@ -22808,7 +24712,7 @@ $fatpacked{"Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'THRALL';
   use strict;
   use warnings;
   
-  our $VERSION = '0.0401';
+  our $VERSION = '0.0402';
   
   1;
   
@@ -22875,7 +24779,7 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
   use strict;
   use warnings;
   
-  our $VERSION = '0.0401';
+  our $VERSION = '0.0402';
   
   use Config;
   
@@ -24196,6 +26100,829 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =cut
 TIME_LOCAL
+
+$fatpacked{"Try/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TRY_TINY';
+  package Try::Tiny; # git description: v0.30-11-g1b81d0a
+  use 5.006;
+  # ABSTRACT: Minimal try/catch with proper preservation of $@
+  
+  our $VERSION = '0.31';
+  
+  use strict;
+  use warnings;
+  
+  use Exporter 5.57 'import';
+  our @EXPORT = our @EXPORT_OK = qw(try catch finally);
+  
+  use Carp;
+  $Carp::Internal{+__PACKAGE__}++;
+  
+  BEGIN {
+    my $su = $INC{'Sub/Util.pm'} && defined &Sub::Util::set_subname;
+    my $sn = $INC{'Sub/Name.pm'} && eval { Sub::Name->VERSION(0.08) };
+    unless ($su || $sn) {
+      $su = eval { require Sub::Util; } && defined &Sub::Util::set_subname;
+      unless ($su) {
+        $sn = eval { require Sub::Name; Sub::Name->VERSION(0.08) };
+      }
+    }
+  
+    *_subname = $su ? \&Sub::Util::set_subname
+              : $sn ? \&Sub::Name::subname
+              : sub { $_[1] };
+    *_HAS_SUBNAME = ($su || $sn) ? sub(){1} : sub(){0};
+  }
+  
+  my %_finally_guards;
+  
+  # Need to prototype as @ not $$ because of the way Perl evaluates the prototype.
+  # Keeping it at $$ means you only ever get 1 sub because we need to eval in a list
+  # context & not a scalar one
+  
+  sub try (&;@) {
+    my ( $try, @code_refs ) = @_;
+  
+    # we need to save this here, the eval block will be in scalar context due
+    # to $failed
+    my $wantarray = wantarray;
+  
+    # work around perl bug by explicitly initializing these, due to the likelyhood
+    # this will be used in global destruction (perl rt#119311)
+    my ( $catch, @finally ) = ();
+  
+    # find labeled blocks in the argument list.
+    # catch and finally tag the blocks by blessing a scalar reference to them.
+    foreach my $code_ref (@code_refs) {
+  
+      if ( ref($code_ref) eq 'Try::Tiny::Catch' ) {
+        croak 'A try() may not be followed by multiple catch() blocks'
+          if $catch;
+        $catch = ${$code_ref};
+      } elsif ( ref($code_ref) eq 'Try::Tiny::Finally' ) {
+        push @finally, ${$code_ref};
+      } else {
+        croak(
+          'try() encountered an unexpected argument ('
+        . ( defined $code_ref ? $code_ref : 'undef' )
+        . ') - perhaps a missing semi-colon before or'
+        );
+      }
+    }
+  
+    # FIXME consider using local $SIG{__DIE__} to accumulate all errors. It's
+    # not perfect, but we could provide a list of additional errors for
+    # $catch->();
+  
+    # name the blocks if we have Sub::Name installed
+    _subname(caller().'::try {...} ' => $try)
+      if _HAS_SUBNAME;
+  
+    # set up scope guards to invoke the finally blocks at the end.
+    # this should really be a function scope lexical variable instead of
+    # file scope + local but that causes issues with perls < 5.20 due to
+    # perl rt#119311
+    local $_finally_guards{guards} = [
+      map Try::Tiny::ScopeGuard->_new($_),
+      @finally
+    ];
+  
+    # save the value of $@ so we can set $@ back to it in the beginning of the eval
+    # and restore $@ after the eval finishes
+    my $prev_error = $@;
+  
+    my ( @ret, $error );
+  
+    # failed will be true if the eval dies, because 1 will not be returned
+    # from the eval body
+    my $failed = not eval {
+      $@ = $prev_error;
+  
+      # evaluate the try block in the correct context
+      if ( $wantarray ) {
+        @ret = $try->();
+      } elsif ( defined $wantarray ) {
+        $ret[0] = $try->();
+      } else {
+        $try->();
+      };
+  
+      return 1; # properly set $failed to false
+    };
+  
+    # preserve the current error and reset the original value of $@
+    $error = $@;
+    $@ = $prev_error;
+  
+    # at this point $failed contains a true value if the eval died, even if some
+    # destructor overwrote $@ as the eval was unwinding.
+    if ( $failed ) {
+      # pass $error to the finally blocks
+      push @$_, $error for @{$_finally_guards{guards}};
+  
+      # if we got an error, invoke the catch block.
+      if ( $catch ) {
+        # This works like given($error), but is backwards compatible and
+        # sets $_ in the dynamic scope for the body of C<$catch>
+        for ($error) {
+          return $catch->($error);
+        }
+  
+        # in case when() was used without an explicit return, the C<for>
+        # loop will be aborted and there's no useful return value
+      }
+  
+      return;
+    } else {
+      # no failure, $@ is back to what it was, everything is fine
+      return $wantarray ? @ret : $ret[0];
+    }
+  }
+  
+  sub catch (&;@) {
+    my ( $block, @rest ) = @_;
+  
+    croak 'Useless bare catch()' unless wantarray;
+  
+    _subname(caller().'::catch {...} ' => $block)
+      if _HAS_SUBNAME;
+    return (
+      bless(\$block, 'Try::Tiny::Catch'),
+      @rest,
+    );
+  }
+  
+  sub finally (&;@) {
+    my ( $block, @rest ) = @_;
+  
+    croak 'Useless bare finally()' unless wantarray;
+  
+    _subname(caller().'::finally {...} ' => $block)
+      if _HAS_SUBNAME;
+    return (
+      bless(\$block, 'Try::Tiny::Finally'),
+      @rest,
+    );
+  }
+  
+  {
+    package # hide from PAUSE
+      Try::Tiny::ScopeGuard;
+  
+    use constant UNSTABLE_DOLLARAT => ("$]" < '5.013002') ? 1 : 0;
+  
+    sub _new {
+      shift;
+      bless [ @_ ];
+    }
+  
+    sub DESTROY {
+      my ($code, @args) = @{ $_[0] };
+  
+      local $@ if UNSTABLE_DOLLARAT;
+      eval {
+        $code->(@args);
+        1;
+      } or do {
+        warn
+          "Execution of finally() block $code resulted in an exception, which "
+        . '*CAN NOT BE PROPAGATED* due to fundamental limitations of Perl. '
+        . 'Your program will continue as if this event never took place. '
+        . "Original exception text follows:\n\n"
+        . (defined $@ ? $@ : '$@ left undefined...')
+        . "\n"
+        ;
+      }
+    }
+  }
+  
+  __PACKAGE__
+  
+  __END__
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  Try::Tiny - Minimal try/catch with proper preservation of $@
+  
+  =head1 VERSION
+  
+  version 0.31
+  
+  =head1 SYNOPSIS
+  
+  You can use Try::Tiny's C<try> and C<catch> to expect and handle exceptional
+  conditions, avoiding quirks in Perl and common mistakes:
+  
+    # handle errors with a catch handler
+    try {
+      die "foo";
+    } catch {
+      warn "caught error: $_"; # not $@
+    };
+  
+  You can also use it like a standalone C<eval> to catch and ignore any error
+  conditions.  Obviously, this is an extreme measure not to be undertaken
+  lightly:
+  
+    # just silence errors
+    try {
+      die "foo";
+    };
+  
+  =head1 DESCRIPTION
+  
+  This module provides bare bones C<try>/C<catch>/C<finally> statements that are designed to
+  minimize common mistakes with eval blocks, and NOTHING else.
+  
+  This is unlike L<TryCatch> which provides a nice syntax and avoids adding
+  another call stack layer, and supports calling C<return> from the C<try> block to
+  return from the parent subroutine. These extra features come at a cost of a few
+  dependencies, namely L<Devel::Declare> and L<Scope::Upper> which are
+  occasionally problematic, and the additional catch filtering uses L<Moose>
+  type constraints which may not be desirable either.
+  
+  The main focus of this module is to provide simple and reliable error handling
+  for those having a hard time installing L<TryCatch>, but who still want to
+  write correct C<eval> blocks without 5 lines of boilerplate each time.
+  
+  It's designed to work as correctly as possible in light of the various
+  pathological edge cases (see L</BACKGROUND>) and to be compatible with any style
+  of error values (simple strings, references, objects, overloaded objects, etc).
+  
+  If the C<try> block dies, it returns the value of the last statement executed in
+  the C<catch> block, if there is one. Otherwise, it returns C<undef> in scalar
+  context or the empty list in list context. The following examples all
+  assign C<"bar"> to C<$x>:
+  
+    my $x = try { die "foo" } catch { "bar" };
+    my $x = try { die "foo" } || "bar";
+    my $x = (try { die "foo" }) // "bar";
+  
+    my $x = eval { die "foo" } || "bar";
+  
+  You can add C<finally> blocks, yielding the following:
+  
+    my $x;
+    try { die 'foo' } finally { $x = 'bar' };
+    try { die 'foo' } catch { warn "Got a die: $_" } finally { $x = 'bar' };
+  
+  C<finally> blocks are always executed making them suitable for cleanup code
+  which cannot be handled using local.  You can add as many C<finally> blocks to a
+  given C<try> block as you like.
+  
+  Note that adding a C<finally> block without a preceding C<catch> block
+  suppresses any errors. This behaviour is consistent with using a standalone
+  C<eval>, but it is not consistent with C<try>/C<finally> patterns found in
+  other programming languages, such as Java, Python, Javascript or C#. If you
+  learned the C<try>/C<finally> pattern from one of these languages, watch out for
+  this.
+  
+  =head1 EXPORTS
+  
+  All functions are exported by default using L<Exporter>.
+  
+  If you need to rename the C<try>, C<catch> or C<finally> keyword consider using
+  L<Sub::Import> to get L<Sub::Exporter>'s flexibility.
+  
+  =over 4
+  
+  =item try (&;@)
+  
+  Takes one mandatory C<try> subroutine, an optional C<catch> subroutine and C<finally>
+  subroutine.
+  
+  The mandatory subroutine is evaluated in the context of an C<eval> block.
+  
+  If no error occurred the value from the first block is returned, preserving
+  list/scalar context.
+  
+  If there was an error and the second subroutine was given it will be invoked
+  with the error in C<$_> (localized) and as that block's first and only
+  argument.
+  
+  C<$@> does B<not> contain the error. Inside the C<catch> block it has the same
+  value it had before the C<try> block was executed.
+  
+  Note that the error may be false, but if that happens the C<catch> block will
+  still be invoked.
+  
+  Once all execution is finished then the C<finally> block, if given, will execute.
+  
+  =item catch (&;@)
+  
+  Intended to be used in the second argument position of C<try>.
+  
+  Returns a reference to the subroutine it was given but blessed as
+  C<Try::Tiny::Catch> which allows try to decode correctly what to do
+  with this code reference.
+  
+    catch { ... }
+  
+  Inside the C<catch> block the caught error is stored in C<$_>, while previous
+  value of C<$@> is still available for use.  This value may or may not be
+  meaningful depending on what happened before the C<try>, but it might be a good
+  idea to preserve it in an error stack.
+  
+  For code that captures C<$@> when throwing new errors (i.e.
+  L<Class::Throwable>), you'll need to do:
+  
+    local $@ = $_;
+  
+  =item finally (&;@)
+  
+    try     { ... }
+    catch   { ... }
+    finally { ... };
+  
+  Or
+  
+    try     { ... }
+    finally { ... };
+  
+  Or even
+  
+    try     { ... }
+    finally { ... }
+    catch   { ... };
+  
+  Intended to be the second or third element of C<try>. C<finally> blocks are always
+  executed in the event of a successful C<try> or if C<catch> is run. This allows
+  you to locate cleanup code which cannot be done via C<local()> e.g. closing a file
+  handle.
+  
+  When invoked, the C<finally> block is passed the error that was caught.  If no
+  error was caught, it is passed nothing.  (Note that the C<finally> block does not
+  localize C<$_> with the error, since unlike in a C<catch> block, there is no way
+  to know if C<$_ == undef> implies that there were no errors.) In other words,
+  the following code does just what you would expect:
+  
+    try {
+      die_sometimes();
+    } catch {
+      # ...code run in case of error
+    } finally {
+      if (@_) {
+        print "The try block died with: @_\n";
+      } else {
+        print "The try block ran without error.\n";
+      }
+    };
+  
+  B<You must always do your own error handling in the C<finally> block>. C<Try::Tiny> will
+  not do anything about handling possible errors coming from code located in these
+  blocks.
+  
+  Furthermore B<exceptions in C<finally> blocks are not trappable and are unable
+  to influence the execution of your program>. This is due to limitation of
+  C<DESTROY>-based scope guards, which C<finally> is implemented on top of. This
+  may change in a future version of Try::Tiny.
+  
+  In the same way C<catch()> blesses the code reference this subroutine does the same
+  except it bless them as C<Try::Tiny::Finally>.
+  
+  =back
+  
+  =head1 BACKGROUND
+  
+  There are a number of issues with C<eval>.
+  
+  =head2 Clobbering $@
+  
+  When you run an C<eval> block and it succeeds, C<$@> will be cleared, potentially
+  clobbering an error that is currently being caught.
+  
+  This causes action at a distance, clearing previous errors your caller may have
+  not yet handled.
+  
+  C<$@> must be properly localized before invoking C<eval> in order to avoid this
+  issue.
+  
+  More specifically,
+  L<before Perl version 5.14.0|perl5140delta/"Exception Handling">
+  C<$@> was clobbered at the beginning of the C<eval>, which
+  also made it impossible to capture the previous error before you die (for
+  instance when making exception objects with error stacks).
+  
+  For this reason C<try> will actually set C<$@> to its previous value (the one
+  available before entering the C<try> block) in the beginning of the C<eval>
+  block.
+  
+  =head2 Localizing $@ silently masks errors
+  
+  Inside an C<eval> block, C<die> behaves sort of like:
+  
+    sub die {
+      $@ = $_[0];
+      return_undef_from_eval();
+    }
+  
+  This means that if you were polite and localized C<$@> you can't die in that
+  scope, or your error will be discarded (printing "Something's wrong" instead).
+  
+  The workaround is very ugly:
+  
+    my $error = do {
+      local $@;
+      eval { ... };
+      $@;
+    };
+  
+    ...
+    die $error;
+  
+  =head2 $@ might not be a true value
+  
+  This code is wrong:
+  
+    if ( $@ ) {
+      ...
+    }
+  
+  because due to the previous caveats it may have been unset.
+  
+  C<$@> could also be an overloaded error object that evaluates to false, but
+  that's asking for trouble anyway.
+  
+  The classic failure mode (fixed in L<Perl 5.14.0|perl5140delta/"Exception Handling">) is:
+  
+    sub Object::DESTROY {
+      eval { ... }
+    }
+  
+    eval {
+      my $obj = Object->new;
+  
+      die "foo";
+    };
+  
+    if ( $@ ) {
+  
+    }
+  
+  In this case since C<Object::DESTROY> is not localizing C<$@> but still uses
+  C<eval>, it will set C<$@> to C<"">.
+  
+  The destructor is called when the stack is unwound, after C<die> sets C<$@> to
+  C<"foo at Foo.pm line 42\n">, so by the time C<if ( $@ )> is evaluated it has
+  been cleared by C<eval> in the destructor.
+  
+  The workaround for this is even uglier than the previous ones. Even though we
+  can't save the value of C<$@> from code that doesn't localize, we can at least
+  be sure the C<eval> was aborted due to an error:
+  
+    my $failed = not eval {
+      ...
+  
+      return 1;
+    };
+  
+  This is because an C<eval> that caught a C<die> will always return a false
+  value.
+  
+  =head1 ALTERNATE SYNTAX
+  
+  Using Perl 5.10 you can use L<perlsyn/"Switch statements"> (but please don't,
+  because that syntax has since been deprecated because there was too much
+  unexpected magical behaviour).
+  
+  =for stopwords topicalizer
+  
+  The C<catch> block is invoked in a topicalizer context (like a C<given> block),
+  but note that you can't return a useful value from C<catch> using the C<when>
+  blocks without an explicit C<return>.
+  
+  This is somewhat similar to Perl 6's C<CATCH> blocks. You can use it to
+  concisely match errors:
+  
+    try {
+      require Foo;
+    } catch {
+      when (/^Can't locate .*?\.pm in \@INC/) { } # ignore
+      default { die $_ }
+    };
+  
+  =head1 CAVEATS
+  
+  =over 4
+  
+  =item *
+  
+  C<@_> is not available within the C<try> block, so you need to copy your
+  argument list. In case you want to work with argument values directly via C<@_>
+  aliasing (i.e. allow C<$_[1] = "foo">), you need to pass C<@_> by reference:
+  
+    sub foo {
+      my ( $self, @args ) = @_;
+      try { $self->bar(@args) }
+    }
+  
+  or
+  
+    sub bar_in_place {
+      my $self = shift;
+      my $args = \@_;
+      try { $_ = $self->bar($_) for @$args }
+    }
+  
+  =item *
+  
+  C<return> returns from the C<try> block, not from the parent sub (note that
+  this is also how C<eval> works, but not how L<TryCatch> works):
+  
+    sub parent_sub {
+      try {
+        die;
+      }
+      catch {
+        return;
+      };
+  
+      say "this text WILL be displayed, even though an exception is thrown";
+    }
+  
+  Instead, you should capture the return value:
+  
+    sub parent_sub {
+      my $success = try {
+        die;
+        1;
+      };
+      return unless $success;
+  
+      say "This text WILL NEVER appear!";
+    }
+    # OR
+    sub parent_sub_with_catch {
+      my $success = try {
+        die;
+        1;
+      }
+      catch {
+        # do something with $_
+        return undef; #see note
+      };
+      return unless $success;
+  
+      say "This text WILL NEVER appear!";
+    }
+  
+  Note that if you have a C<catch> block, it must return C<undef> for this to work,
+  since if a C<catch> block exists, its return value is returned in place of C<undef>
+  when an exception is thrown.
+  
+  =item *
+  
+  C<try> introduces another caller stack frame. L<Sub::Uplevel> is not used. L<Carp>
+  will not report this when using full stack traces, though, because
+  C<%Carp::Internal> is used. This lack of magic is considered a feature.
+  
+  =for stopwords unhygienically
+  
+  =item *
+  
+  The value of C<$_> in the C<catch> block is not guaranteed to be the value of
+  the exception thrown (C<$@>) in the C<try> block.  There is no safe way to
+  ensure this, since C<eval> may be used unhygienically in destructors.  The only
+  guarantee is that the C<catch> will be called if an exception is thrown.
+  
+  =item *
+  
+  The return value of the C<catch> block is not ignored, so if testing the result
+  of the expression for truth on success, be sure to return a false value from
+  the C<catch> block:
+  
+    my $obj = try {
+      MightFail->new;
+    } catch {
+      ...
+  
+      return; # avoid returning a true value;
+    };
+  
+    return unless $obj;
+  
+  =item *
+  
+  C<$SIG{__DIE__}> is still in effect.
+  
+  Though it can be argued that C<$SIG{__DIE__}> should be disabled inside of
+  C<eval> blocks, since it isn't people have grown to rely on it. Therefore in
+  the interests of compatibility, C<try> does not disable C<$SIG{__DIE__}> for
+  the scope of the error throwing code.
+  
+  =item *
+  
+  Lexical C<$_> may override the one set by C<catch>.
+  
+  For example Perl 5.10's C<given> form uses a lexical C<$_>, creating some
+  confusing behavior:
+  
+    given ($foo) {
+      when (...) {
+        try {
+          ...
+        } catch {
+          warn $_; # will print $foo, not the error
+          warn $_[0]; # instead, get the error like this
+        }
+      }
+    }
+  
+  Note that this behavior was changed once again in
+  L<Perl5 version 18|https://metacpan.org/module/perldelta#given-now-aliases-the-global-_>.
+  However, since the entirety of lexical C<$_> is now L<considered experimental
+  |https://metacpan.org/module/perldelta#Lexical-_-is-now-experimental>, it
+  is unclear whether the new version 18 behavior is final.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  =over 4
+  
+  =item L<Syntax::Keyword::Try>
+  
+  Only available on perls >= 5.14, with a slightly different syntax (e.g. no trailing C<;> because
+  it's actually a keyword, not a sub, but this means you can C<return> and C<next> within it). Use
+  L<Feature::Compat::Try> to automatically switch to the native C<try> syntax in newer perls (when
+  available). See also L<Try Catch Exception Handling|perlsyn/Try-Catch-Exception-Handling>.
+  
+  =item L<TryCatch>
+  
+  Much more feature complete, more convenient semantics, but at the cost of
+  implementation complexity.
+  
+  =item L<autodie>
+  
+  Automatic error throwing for builtin functions and more. Also designed to
+  work well with C<given>/C<when>.
+  
+  =item L<Throwable>
+  
+  A lightweight role for rolling your own exception classes.
+  
+  =item L<Error>
+  
+  Exception object implementation with a C<try> statement. Does not localize
+  C<$@>.
+  
+  =item L<Exception::Class::TryCatch>
+  
+  Provides a C<catch> statement, but properly calling C<eval> is your
+  responsibility.
+  
+  The C<try> keyword pushes C<$@> onto an error stack, avoiding some of the
+  issues with C<$@>, but you still need to localize to prevent clobbering.
+  
+  =back
+  
+  =head1 LIGHTNING TALK
+  
+  I gave a lightning talk about this module, you can see the slides (Firefox
+  only):
+  
+  L<http://web.archive.org/web/20100628040134/http://nothingmuch.woobling.org/talks/takahashi.xul>
+  
+  Or read the source:
+  
+  L<http://web.archive.org/web/20100305133605/http://nothingmuch.woobling.org/talks/yapc_asia_2009/try_tiny.yml>
+  
+  =head1 SUPPORT
+  
+  Bugs may be submitted through L<the RT bug tracker|https://rt.cpan.org/Public/Dist/Display.html?Name=Try-Tiny>
+  (or L<bug-Try-Tiny@rt.cpan.org|mailto:bug-Try-Tiny@rt.cpan.org>).
+  
+  =head1 AUTHORS
+  
+  =over 4
+  
+  =item *
+  
+  יובל קוג'מן (Yuval Kogman) <nothingmuch@woobling.org>
+  
+  =item *
+  
+  Jesse Luehrs <doy@tozt.net>
+  
+  =back
+  
+  =head1 CONTRIBUTORS
+  
+  =for stopwords Karen Etheridge Peter Rabbitson Ricardo Signes Mark Fowler Graham Knop Aristotle Pagaltzis Dagfinn Ilmari Mannsåker Lukas Mai Alex anaxagoras Andrew Yates awalker chromatic cm-perl David Lowe Glenn Hans Dieter Pearcey Jens Berthold Jonathan Yu Marc Mims Stosberg Pali Paul Howarth Rudolf Leermakers
+  
+  =over 4
+  
+  =item *
+  
+  Karen Etheridge <ether@cpan.org>
+  
+  =item *
+  
+  Peter Rabbitson <ribasushi@cpan.org>
+  
+  =item *
+  
+  Ricardo Signes <rjbs@cpan.org>
+  
+  =item *
+  
+  Mark Fowler <mark@twoshortplanks.com>
+  
+  =item *
+  
+  Graham Knop <haarg@haarg.org>
+  
+  =item *
+  
+  Aristotle Pagaltzis <pagaltzis@gmx.de>
+  
+  =item *
+  
+  Dagfinn Ilmari Mannsåker <ilmari@ilmari.org>
+  
+  =item *
+  
+  Lukas Mai <l.mai@web.de>
+  
+  =item *
+  
+  Alex <alex@koban.(none)>
+  
+  =item *
+  
+  anaxagoras <walkeraj@gmail.com>
+  
+  =item *
+  
+  Andrew Yates <ayates@haddock.local>
+  
+  =item *
+  
+  awalker <awalker@sourcefire.com>
+  
+  =item *
+  
+  chromatic <chromatic@wgz.org>
+  
+  =item *
+  
+  cm-perl <cm-perl@users.noreply.github.com>
+  
+  =item *
+  
+  David Lowe <davidl@lokku.com>
+  
+  =item *
+  
+  Glenn Fowler <cebjyre@cpan.org>
+  
+  =item *
+  
+  Hans Dieter Pearcey <hdp@weftsoar.net>
+  
+  =item *
+  
+  Jens Berthold <jens@jebecs.de>
+  
+  =item *
+  
+  Jonathan Yu <JAWNSY@cpan.org>
+  
+  =item *
+  
+  Marc Mims <marc@questright.com>
+  
+  =item *
+  
+  Mark Stosberg <mark@stosberg.com>
+  
+  =item *
+  
+  Pali <pali@cpan.org>
+  
+  =item *
+  
+  Paul Howarth <paul@city-fan.org>
+  
+  =item *
+  
+  Rudolf Leermakers <rudolf@hatsuseno.org>
+  
+  =back
+  
+  =head1 COPYRIGHT AND LICENCE
+  
+  This software is Copyright (c) 2009 by יובל קוג'מן (Yuval Kogman).
+  
+  This is free software, licensed under:
+  
+    The MIT (X11) License
+  
+  =cut
+TRY_TINY
 
 $fatpacked{"URI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI';
   package URI;
@@ -28210,7 +30937,7 @@ our $VERSION = '0.0101';
 BEGIN {
     if ($INC[0] =~ /^FatPacked::/) {
         require Clone::PP;
-        $INC{'Clone/PP.pm'} = $INC{'Clone'};
+        $INC{'Clone.pm'} = $INC{'Clone/PP.pm'};
     }
 }
 
@@ -28354,7 +31081,7 @@ and L<Starlight> otherwise.
 
 =for markdown ```sh
 
-    lwp-request -m get http://git.io/jEE6 | sh
+    lwp-request -m get https://raw.githubusercontent.com/dex4er/PureProxy/master/fatpack/install.sh | sh
 
 =for markdown ```
 
@@ -28362,7 +31089,7 @@ or
 
 =for markdown ```sh
 
-    curl -qsSL http://git.io/jEE6 | sh
+    curl -qsSL https://raw.githubusercontent.com/dex4er/PureProxy/master/fatpack/install.sh | sh
 
 =for markdown ```
 
@@ -28370,7 +31097,7 @@ or
 
 =for markdown ```sh
 
-    wget --quiet -O- http://git.io/jEE6 | sh
+    wget --quiet -O- https://raw.githubusercontent.com/dex4er/PureProxy/master/fatpack/install.sh | sh
 
 =for markdown ```
 

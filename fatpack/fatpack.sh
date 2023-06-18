@@ -63,9 +63,13 @@ for mod in \
     parent \
     Clone::PP \
     Exporter \
+    HTTP::Date \
+    HTTP::Status \
     HTTP::Tiny \
     JSON::MaybeXS \
+    Module::Load \
     Time::Local \
+    Try::Tiny \
     URI \
     URI::Escape \
     WWW::Form::UrlEncoded \
@@ -86,3 +90,5 @@ ${FATPACK} file ../script/pureproxy.pl >pureproxy
 
 ${PERL} -pi -e 's{^#!.*/perl$}{#!/usr/bin/env perl}' pureproxy
 chmod +x pureproxy
+
+${PERL} ./pureproxy -v

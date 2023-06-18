@@ -16,7 +16,7 @@ our $VERSION = '0.0101';
 BEGIN {
     if ($INC[0] =~ /^FatPacked::/) {
         require Clone::PP;
-        $INC{'Clone/PP.pm'} = $INC{'Clone'};
+        $INC{'Clone.pm'} = $INC{'Clone/PP.pm'};
     }
 }
 
