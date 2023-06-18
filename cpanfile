@@ -27,6 +27,7 @@ feature fatpack => sub {
     requires 'parent';
     requires 'App::FatPacker';
     requires 'Exporter';
+    requires 'Clone::PP';
     requires 'HTTP::Parser';
     requires 'HTTP::Tiny';
     requires 'Time::Local';
