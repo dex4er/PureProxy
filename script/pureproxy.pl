@@ -70,7 +70,7 @@ sub version {
     print _version(), "\n";
 }
 
-$runner->parse_options(@ARGV);
+$runner->parse_options('--max-workers=50', @ARGV);
 
 if ($runner->{help}) {
     require Pod::Usage;

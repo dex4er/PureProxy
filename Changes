@@ -1,6 +1,7 @@
 0.0101  2023-06-18      Piotr Roszatycki <dexter@cpan.org>
 
 * Thrall server is preferred when threads are enabled.
+* Default number of workers is 50.
 * Requires Thrall 0.0402 and Starlight 0.0501.
 * Provides cpanfile.
 * Removed fatpack from the manifest.
