@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -eu
+
 PERL=${PERL:-perl}
 FATPACK=${FATPACK:-fatpack}
 
@@ -40,7 +42,7 @@ delete=$(
     done
 )
 
-# cpm install --reinstall if parent Exporter HTTP::Tiny
+# cpm install -g --reinstall if parent Exporter HTTP::Date HTTP::Status HTTP::Tiny IO::Socket::IP Module::Load Time::Local Try::Tiny
 
 cd "$(dirname "$0")" || exit 0
 
@@ -66,6 +68,7 @@ for mod in \
     HTTP::Date \
     HTTP::Status \
     HTTP::Tiny \
+    IO::Socket::IP \
     JSON::MaybeXS \
     Module::Load \
     Time::Local \
@@ -84,7 +87,7 @@ for mod in \
 done
 
 rm -rf fatlib/auto/share
-find fatlib \( -name .keep -o -name '*.bundle' -o -name '*.pod' \) -print0 | xargs -0r rm -f
+find fatlib \( -name .keep -o -name '*.bundle' -o -name '*.ix' -o -name '*.pod' \) -print0 | xargs -0r rm -f
 
 ${FATPACK} file ../script/pureproxy.pl >pureproxy
 

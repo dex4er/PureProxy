@@ -54,7 +54,7 @@ jobs:
         run: cpm install --color --no-test --feature=fatpack
 
       - name: Reinstall fatpack dependencies
-        run: cpm install --color --no-test --reinstall if parent Exporter HTTP::Date HTTP::Status HTTP::Tiny Module::Load Time::Local Try::Tiny
+        run: cpm install --color --no-test --reinstall if parent Exporter HTTP::Date HTTP::Status HTTP::Tiny IO::Socket::IP Module::Load Time::Local Try::Tiny
 
       - name: Make distribution
         run: ./Dist.SH

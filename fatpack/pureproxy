@@ -1621,6 +1621,467 @@ $fatpacked{"Exporter/Heavy.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'
   1;
 EXPORTER_HEAVY
 
+$fatpacked{"HTTP/Config.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_CONFIG';
+  package HTTP::Config;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  use URI;
+  
+  sub new {
+      my $class = shift;
+      return bless [], $class;
+  }
+  
+  sub entries {
+      my $self = shift;
+      @$self;
+  }
+  
+  sub empty {
+      my $self = shift;
+      not @$self;
+  }
+  
+  sub add {
+      if (@_ == 2) {
+          my $self = shift;
+          push(@$self, shift);
+          return;
+      }
+      my($self, %spec) = @_;
+      push(@$self, \%spec);
+      return;
+  }
+  
+  sub find2 {
+      my($self, %spec) = @_;
+      my @found;
+      my @rest;
+   ITEM:
+      for my $item (@$self) {
+          for my $k (keys %spec) {
+              no warnings 'uninitialized';
+              if (!exists $item->{$k} || $spec{$k} ne $item->{$k}) {
+                  push(@rest, $item);
+                  next ITEM;
+              }
+          }
+          push(@found, $item);
+      }
+      return \@found unless wantarray;
+      return \@found, \@rest;
+  }
+  
+  sub find {
+      my $self = shift;
+      my $f = $self->find2(@_);
+      return @$f if wantarray;
+      return $f->[0];
+  }
+  
+  sub remove {
+      my($self, %spec) = @_;
+      my($removed, $rest) = $self->find2(%spec);
+      @$self = @$rest if @$removed;
+      return @$removed;
+  }
+  
+  my %MATCH = (
+      m_scheme => sub {
+          my($v, $uri) = @_;
+          return $uri->_scheme eq $v;  # URI known to be canonical
+      },
+      m_secure => sub {
+          my($v, $uri) = @_;
+          my $secure = $uri->can("secure") ? $uri->secure : $uri->_scheme eq "https";
+          return $secure == !!$v;
+      },
+      m_host_port => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("host_port");
+          return $uri->host_port eq $v, 7;
+      },
+      m_host => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("host");
+          return $uri->host eq $v, 6;
+      },
+      m_port => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("port");
+          return $uri->port eq $v;
+      },
+      m_domain => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("host");
+          my $h = $uri->host;
+          $h = "$h.local" unless $h =~ /\./;
+          $v = ".$v" unless $v =~ /^\./;
+          return length($v), 5 if substr($h, -length($v)) eq $v;
+          return 0;
+      },
+      m_path => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("path");
+          return $uri->path eq $v, 4;
+      },
+      m_path_prefix => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("path");
+          my $path = $uri->path;
+          my $len = length($v);
+          return $len, 3 if $path eq $v;
+          return 0 if length($path) <= $len;
+          $v .= "/" unless $v =~ m,/\z,,;
+          return $len, 3 if substr($path, 0, length($v)) eq $v;
+          return 0;
+      },
+      m_path_match => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("path");
+          return $uri->path =~ $v;
+      },
+      m_uri__ => sub {
+          my($v, $k, $uri) = @_;
+          return unless $uri->can($k);
+          return 1 unless defined $v;
+          return $uri->$k eq $v;
+      },
+      m_method => sub {
+          my($v, $uri, $request) = @_;
+          return $request && $request->method eq $v;
+      },
+      m_proxy => sub {
+          my($v, $uri, $request) = @_;
+          return $request && ($request->{proxy} || "") eq $v;
+      },
+      m_code => sub {
+          my($v, $uri, $request, $response) = @_;
+          $v =~ s/xx\z//;
+          return unless $response;
+          return length($v), 2 if substr($response->code, 0, length($v)) eq $v;
+      },
+      m_media_type => sub {  # for request too??
+          my($v, $uri, $request, $response) = @_;
+          return unless $response;
+          return 1, 1 if $v eq "*/*";
+          my $ct = $response->content_type;
+          return 2, 1 if $v =~ s,/\*\z,, && $ct =~ m,^\Q$v\E/,;
+          return 3, 1 if $v eq "html" && $response->content_is_html;
+          return 4, 1 if $v eq "xhtml" && $response->content_is_xhtml;
+          return 10, 1 if $v eq $ct;
+          return 0;
+      },
+      m_header__ => sub {
+          my($v, $k, $uri, $request, $response) = @_;
+          return unless $request;
+          my $req_header = $request->header($k);
+          return 1 if defined($req_header) && $req_header eq $v;
+          if ($response) {
+              my $res_header = $response->header($k);
+              return 1 if defined($res_header) && $res_header eq $v;
+          }
+          return 0;
+      },
+      m_response_attr__ => sub {
+          my($v, $k, $uri, $request, $response) = @_;
+          return unless $response;
+          return 1 if !defined($v) && exists $response->{$k};
+          return 0 unless exists $response->{$k};
+          return 1 if $response->{$k} eq $v;
+          return 0;
+      },
+  );
+  
+  sub matching {
+      my $self = shift;
+      if (@_ == 1) {
+          if ($_[0]->can("request")) {
+              unshift(@_, $_[0]->request);
+              unshift(@_, undef) unless defined $_[0];
+          }
+          unshift(@_, $_[0]->uri_canonical) if $_[0] && $_[0]->can("uri_canonical");
+      }
+      my($uri, $request, $response) = @_;
+      $uri = URI->new($uri) unless ref($uri);
+  
+      my @m;
+   ITEM:
+      for my $item (@$self) {
+          my $order;
+          for my $ikey (keys %$item) {
+              my $mkey = $ikey;
+              my $k;
+              $k = $1 if $mkey =~ s/__(.*)/__/;
+              if (my $m = $MATCH{$mkey}) {
+                  #print "$ikey $mkey\n";
+                  my($c, $o);
+                  my @arg = (
+                      defined($k) ? $k : (),
+                      $uri, $request, $response
+                  );
+                  my $v = $item->{$ikey};
+                  $v = [$v] unless ref($v) eq "ARRAY";
+                  for (@$v) {
+                      ($c, $o) = $m->($_, @arg);
+                      #print "  - $_ ==> $c $o\n";
+                      last if $c;
+                  }
+                  next ITEM unless $c;
+                  $order->[$o || 0] += $c;
+              }
+          }
+          $order->[7] ||= 0;
+          $item->{_order} = join(".", reverse map sprintf("%03d", $_ || 0), @$order);
+          push(@m, $item);
+      }
+      @m = sort { $b->{_order} cmp $a->{_order} } @m;
+      delete $_->{_order} for @m;
+      return @m if wantarray;
+      return $m[0];
+  }
+  
+  sub add_item {
+      my $self = shift;
+      my $item = shift;
+      return $self->add(item => $item, @_);
+  }
+  
+  sub remove_items {
+      my $self = shift;
+      return map $_->{item}, $self->remove(@_);
+  }
+  
+  sub matching_items {
+      my $self = shift;
+      return map $_->{item}, $self->matching(@_);
+  }
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Config - Configuration for request and response objects
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 SYNOPSIS
+  
+   use HTTP::Config;
+   my $c = HTTP::Config->new;
+   $c->add(m_domain => ".example.com", m_scheme => "http", verbose => 1);
+   
+   use HTTP::Request;
+   my $request = HTTP::Request->new(GET => "http://www.example.com");
+   
+   if (my @m = $c->matching($request)) {
+      print "Yadayada\n" if $m[0]->{verbose};
+   }
+  
+  =head1 DESCRIPTION
+  
+  An C<HTTP::Config> object is a list of entries that
+  can be matched against request or request/response pairs.  Its
+  purpose is to hold configuration data that can be looked up given a
+  request or response object.
+  
+  Each configuration entry is a hash.  Some keys specify matching to
+  occur against attributes of request/response objects.  Other keys can
+  be used to hold user data.
+  
+  The following methods are provided:
+  
+  =over 4
+  
+  =item $conf = HTTP::Config->new
+  
+  Constructs a new empty C<HTTP::Config> object and returns it.
+  
+  =item $conf->entries
+  
+  Returns the list of entries in the configuration object.
+  In scalar context returns the number of entries.
+  
+  =item $conf->empty
+  
+  Return true if there are no entries in the configuration object.
+  This is just a shorthand for C<< not $conf->entries >>.
+  
+  =item $conf->add( %matchspec, %other )
+  
+  =item $conf->add( \%entry )
+  
+  Adds a new entry to the configuration.
+  You can either pass separate key/value pairs or a hash reference.
+  
+  =item $conf->remove( %spec )
+  
+  Removes (and returns) the entries that have matches for all the key/value pairs in %spec.
+  If %spec is empty this will match all entries; so it will empty the configuration object.
+  
+  =item $conf->matching( $uri, $request, $response )
+  
+  =item $conf->matching( $uri )
+  
+  =item $conf->matching( $request )
+  
+  =item $conf->matching( $response )
+  
+  Returns the entries that match the given $uri, $request and $response triplet.
+  
+  If called with a single $request object then the $uri is obtained by calling its 'uri_canonical' method.
+  If called with a single $response object, then the request object is obtained by calling its 'request' method;
+  and then the $uri is obtained as if a single $request was provided.
+  
+  The entries are returned with the most specific matches first.
+  In scalar context returns the most specific match or C<undef> in none match.
+  
+  =item $conf->add_item( $item, %matchspec )
+  
+  =item $conf->remove_items( %spec )
+  
+  =item $conf->matching_items( $uri, $request, $response )
+  
+  Wrappers that hides the entries themselves.
+  
+  =back
+  
+  =head2 Matching
+  
+  The following keys on a configuration entry specify matching.  For all
+  of these you can provide an array of values instead of a single value.
+  The entry matches if at least one of the values in the array matches.
+  
+  Entries that require match against a response object attribute will never match
+  unless a response object was provided.
+  
+  =over
+  
+  =item m_scheme => $scheme
+  
+  Matches if the URI uses the specified scheme; e.g. "http".
+  
+  =item m_secure => $bool
+  
+  If $bool is TRUE; matches if the URI uses a secure scheme.  If $bool
+  is FALSE; matches if the URI does not use a secure scheme.  An example
+  of a secure scheme is "https".
+  
+  =item m_host_port => "$hostname:$port"
+  
+  Matches if the URI's host_port method return the specified value.
+  
+  =item m_host => $hostname
+  
+  Matches if the URI's host method returns the specified value.
+  
+  =item m_port => $port
+  
+  Matches if the URI's port method returns the specified value.
+  
+  =item m_domain => ".$domain"
+  
+  Matches if the URI's host method return a value that within the given
+  domain.  The hostname "www.example.com" will for instance match the
+  domain ".com".
+  
+  =item m_path => $path
+  
+  Matches if the URI's path method returns the specified value.
+  
+  =item m_path_prefix => $path
+  
+  Matches if the URI's path is the specified path or has the specified
+  path as prefix.
+  
+  =item m_path_match => $Regexp
+  
+  Matches if the regular expression matches the URI's path.  Eg. qr/\.html$/.
+  
+  =item m_method => $method
+  
+  Matches if the request method matches the specified value. Eg. "GET" or "POST".
+  
+  =item m_code => $digit
+  
+  =item m_code => $status_code
+  
+  Matches if the response status code matches.  If a single digit is
+  specified; matches for all response status codes beginning with that digit.
+  
+  =item m_proxy => $url
+  
+  Matches if the request is to be sent to the given Proxy server.
+  
+  =item m_media_type => "*/*"
+  
+  =item m_media_type => "text/*"
+  
+  =item m_media_type => "html"
+  
+  =item m_media_type => "xhtml"
+  
+  =item m_media_type => "text/html"
+  
+  Matches if the response media type matches.
+  
+  With a value of "html" matches if $response->content_is_html returns TRUE.
+  With a value of "xhtml" matches if $response->content_is_xhtml returns TRUE.
+  
+  =item m_uri__I<$method> => undef
+  
+  Matches if the URI object provides the method.
+  
+  =item m_uri__I<$method> => $string
+  
+  Matches if the URI's $method method returns the given value.
+  
+  =item m_header__I<$field> => $string
+  
+  Matches if either the request or the response have a header $field with the given value.
+  
+  =item m_response_attr__I<$key> => undef
+  
+  =item m_response_attr__I<$key> => $string
+  
+  Matches if the response object has that key, or the entry has the given value.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<URI>, L<HTTP::Request>, L<HTTP::Response>
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: Configuration for request and response objects
+  
+HTTP_CONFIG
+
 $fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_DATE';
   package HTTP::Date;
   
@@ -3624,6 +4085,262 @@ $fatpacked{"HTTP/Headers.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HT
   
 HTTP_HEADERS
 
+$fatpacked{"HTTP/Headers/Auth.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_HEADERS_AUTH';
+  package HTTP::Headers::Auth;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  use HTTP::Headers;
+  
+  package
+      HTTP::Headers;
+  
+  BEGIN {
+      # we provide a new (and better) implementations below
+      undef(&www_authenticate);
+      undef(&proxy_authenticate);
+  }
+  
+  require HTTP::Headers::Util;
+  
+  sub _parse_authenticate
+  {
+      my @ret;
+      for (HTTP::Headers::Util::split_header_words(@_)) {
+  	if (!defined($_->[1])) {
+  	    # this is a new auth scheme
+  	    push(@ret, shift(@$_) => {});
+  	    shift @$_;
+  	}
+  	if (@ret) {
+  	    # this a new parameter pair for the last auth scheme
+  	    while (@$_) {
+  		my $k = shift @$_;
+  		my $v = shift @$_;
+  	        $ret[-1]{$k} = $v;
+  	    }
+  	}
+  	else {
+  	    # something wrong, parameter pair without any scheme seen
+  	    # IGNORE
+  	}
+      }
+      @ret;
+  }
+  
+  sub _authenticate
+  {
+      my $self = shift;
+      my $header = shift;
+      my @old = $self->_header($header);
+      if (@_) {
+  	$self->remove_header($header);
+  	my @new = @_;
+  	while (@new) {
+  	    my $a_scheme = shift(@new);
+  	    if ($a_scheme =~ /\s/) {
+  		# assume complete valid value, pass it through
+  		$self->push_header($header, $a_scheme);
+  	    }
+  	    else {
+  		my @param;
+  		if (@new) {
+  		    my $p = $new[0];
+  		    if (ref($p) eq "ARRAY") {
+  			@param = @$p;
+  			shift(@new);
+  		    }
+  		    elsif (ref($p) eq "HASH") {
+  			@param = %$p;
+  			shift(@new);
+  		    }
+  		}
+  		my $val = ucfirst(lc($a_scheme));
+  		if (@param) {
+  		    my $sep = " ";
+  		    while (@param) {
+  			my $k = shift @param;
+  			my $v = shift @param;
+  			if ($v =~ /[^0-9a-zA-Z]/ || lc($k) eq "realm") {
+  			    # must quote the value
+  			    $v =~ s,([\\\"]),\\$1,g;
+  			    $v = qq("$v");
+  			}
+  			$val .= "$sep$k=$v";
+  			$sep = ", ";
+  		    }
+  		}
+  		$self->push_header($header, $val);
+  	    }
+  	}
+      }
+      return unless defined wantarray;
+      wantarray ? _parse_authenticate(@old) : join(", ", @old);
+  }
+  
+  
+  sub www_authenticate    { shift->_authenticate("WWW-Authenticate", @_)   }
+  sub proxy_authenticate  { shift->_authenticate("Proxy-Authenticate", @_) }
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Headers::Auth
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+HTTP_HEADERS_AUTH
+
+$fatpacked{"HTTP/Headers/ETag.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_HEADERS_ETAG';
+  package HTTP::Headers::ETag;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  require HTTP::Date;
+  
+  require HTTP::Headers;
+  package
+      HTTP::Headers;
+  
+  sub _etags
+  {
+      my $self = shift;
+      my $header = shift;
+      my @old = _split_etag_list($self->_header($header));
+      if (@_) {
+  	$self->_header($header => join(", ", _split_etag_list(@_)));
+      }
+      wantarray ? @old : join(", ", @old);
+  }
+  
+  sub etag          { shift->_etags("ETag", @_); }
+  sub if_match      { shift->_etags("If-Match", @_); }
+  sub if_none_match { shift->_etags("If-None-Match", @_); }
+  
+  sub if_range {
+      # Either a date or an entity-tag
+      my $self = shift;
+      my @old = $self->_header("If-Range");
+      if (@_) {
+  	my $new = shift;
+  	if (!defined $new) {
+  	    $self->remove_header("If-Range");
+  	}
+  	elsif ($new =~ /^\d+$/) {
+  	    $self->_date_header("If-Range", $new);
+  	}
+  	else {
+  	    $self->_etags("If-Range", $new);
+  	}
+      }
+      return unless defined(wantarray);
+      for (@old) {
+  	my $t = HTTP::Date::str2time($_);
+  	$_ = $t if $t;
+      }
+      wantarray ? @old : join(", ", @old);
+  }
+  
+  
+  # Split a list of entity tag values.  The return value is a list
+  # consisting of one element per entity tag.  Suitable for parsing
+  # headers like C<If-Match>, C<If-None-Match>.  You might even want to
+  # use it on C<ETag> and C<If-Range> entity tag values, because it will
+  # normalize them to the common form.
+  #
+  #  entity-tag	  = [ weak ] opaque-tag
+  #  weak		  = "W/"
+  #  opaque-tag	  = quoted-string
+  
+  
+  sub _split_etag_list
+  {
+      my(@val) = @_;
+      my @res;
+      for (@val) {
+          while (length) {
+              my $weak = "";
+  	    $weak = "W/" if s,^\s*[wW]/,,;
+              my $etag = "";
+  	    if (s/^\s*(\"[^\"\\]*(?:\\.[^\"\\]*)*\")//) {
+  		push(@res, "$weak$1");
+              }
+              elsif (s/^\s*,//) {
+                  push(@res, qq(W/"")) if $weak;
+              }
+              elsif (s/^\s*([^,\s]+)//) {
+                  $etag = $1;
+  		$etag =~ s/([\"\\])/\\$1/g;
+  	        push(@res, qq($weak"$etag"));
+              }
+              elsif (s/^\s+// || !length) {
+                  push(@res, qq(W/"")) if $weak;
+              }
+              else {
+  	 	die "This should not happen: '$_'";
+              }
+          }
+     }
+     @res;
+  }
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Headers::ETag
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+HTTP_HEADERS_ETAG
+
 $fatpacked{"HTTP/Headers/Fast.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_HEADERS_FAST';
   package HTTP::Headers::Fast;
   use strict;
@@ -4344,6 +5061,1466 @@ $fatpacked{"HTTP/Headers/Fast.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".
   =cut
   
 HTTP_HEADERS_FAST
+
+$fatpacked{"HTTP/Headers/Util.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_HEADERS_UTIL';
+  package HTTP::Headers::Util;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  use Exporter 5.57 'import';
+  
+  our @EXPORT_OK=qw(split_header_words _split_header_words join_header_words);
+  
+  
+  sub split_header_words {
+      my @res = &_split_header_words;
+      for my $arr (@res) {
+  	for (my $i = @$arr - 2; $i >= 0; $i -= 2) {
+  	    $arr->[$i] = lc($arr->[$i]);
+  	}
+      }
+      return @res;
+  }
+  
+  sub _split_header_words
+  {
+      my(@val) = @_;
+      my @res;
+      for (@val) {
+  	my @cur;
+  	while (length) {
+  	    if (s/^\s*(=*[^\s=;,]+)//) {  # 'token' or parameter 'attribute'
+  		push(@cur, $1);
+  		# a quoted value
+  		if (s/^\s*=\s*\"([^\"\\]*(?:\\.[^\"\\]*)*)\"//) {
+  		    my $val = $1;
+  		    $val =~ s/\\(.)/$1/g;
+  		    push(@cur, $val);
+  		# some unquoted value
+  		}
+  		elsif (s/^\s*=\s*([^;,\s]*)//) {
+  		    my $val = $1;
+  		    $val =~ s/\s+$//;
+  		    push(@cur, $val);
+  		# no value, a lone token
+  		}
+  		else {
+  		    push(@cur, undef);
+  		}
+  	    }
+  	    elsif (s/^\s*,//) {
+  		push(@res, [@cur]) if @cur;
+  		@cur = ();
+  	    }
+  	    elsif (s/^\s*;// || s/^\s+// || s/^=//) {
+  		# continue
+  	    }
+  	    else {
+  		die "This should not happen: '$_'";
+  	    }
+  	}
+  	push(@res, \@cur) if @cur;
+      }
+      @res;
+  }
+  
+  
+  sub join_header_words
+  {
+      @_ = ([@_]) if @_ && !ref($_[0]);
+      my @res;
+      for (@_) {
+  	my @cur = @$_;
+  	my @attr;
+  	while (@cur) {
+  	    my $k = shift @cur;
+  	    my $v = shift @cur;
+  	    if (defined $v) {
+  		if ($v =~ /[\x00-\x20()<>@,;:\\\"\/\[\]?={}\x7F-\xFF]/ || !length($v)) {
+  		    $v =~ s/([\"\\])/\\$1/g;  # escape " and \
+  		    $k .= qq(="$v");
+  		}
+  		else {
+  		    # token
+  		    $k .= "=$v";
+  		}
+  	    }
+  	    push(@attr, $k);
+  	}
+  	push(@res, join("; ", @attr)) if @attr;
+      }
+      join(", ", @res);
+  }
+  
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Headers::Util - Header value parsing utility functions
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 SYNOPSIS
+  
+    use HTTP::Headers::Util qw(split_header_words);
+    @values = split_header_words($h->header("Content-Type"));
+  
+  =head1 DESCRIPTION
+  
+  This module provides a few functions that helps parsing and
+  construction of valid HTTP header values.  None of the functions are
+  exported by default.
+  
+  The following functions are available:
+  
+  =over 4
+  
+  =item split_header_words( @header_values )
+  
+  This function will parse the header values given as argument into a
+  list of anonymous arrays containing key/value pairs.  The function
+  knows how to deal with ",", ";" and "=" as well as quoted values after
+  "=".  A list of space separated tokens are parsed as if they were
+  separated by ";".
+  
+  If the @header_values passed as argument contains multiple values,
+  then they are treated as if they were a single value separated by
+  comma ",".
+  
+  This means that this function is useful for parsing header fields that
+  follow this syntax (BNF as from the HTTP/1.1 specification, but we relax
+  the requirement for tokens).
+  
+    headers           = #header
+    header            = (token | parameter) *( [";"] (token | parameter))
+  
+    token             = 1*<any CHAR except CTLs or separators>
+    separators        = "(" | ")" | "<" | ">" | "@"
+                      | "," | ";" | ":" | "\" | <">
+                      | "/" | "[" | "]" | "?" | "="
+                      | "{" | "}" | SP | HT
+  
+    quoted-string     = ( <"> *(qdtext | quoted-pair ) <"> )
+    qdtext            = <any TEXT except <">>
+    quoted-pair       = "\" CHAR
+  
+    parameter         = attribute "=" value
+    attribute         = token
+    value             = token | quoted-string
+  
+  Each I<header> is represented by an anonymous array of key/value
+  pairs.  The keys will be all be forced to lower case.
+  The value for a simple token (not part of a parameter) is C<undef>.
+  Syntactically incorrect headers will not necessarily be parsed as you
+  would want.
+  
+  This is easier to describe with some examples:
+  
+     split_header_words('foo="bar"; port="80,81"; DISCARD, BAR=baz');
+     split_header_words('text/html; charset="iso-8859-1"');
+     split_header_words('Basic realm="\\"foo\\\\bar\\""');
+  
+  will return
+  
+     [foo=>'bar', port=>'80,81', discard=> undef], [bar=>'baz' ]
+     ['text/html' => undef, charset => 'iso-8859-1']
+     [basic => undef, realm => "\"foo\\bar\""]
+  
+  If you don't want the function to convert tokens and attribute keys to
+  lower case you can call it as C<_split_header_words> instead (with a
+  leading underscore).
+  
+  =item join_header_words( @arrays )
+  
+  This will do the opposite of the conversion done by split_header_words().
+  It takes a list of anonymous arrays as arguments (or a list of
+  key/value pairs) and produces a single header value.  Attribute values
+  are quoted if needed.
+  
+  Example:
+  
+     join_header_words(["text/plain" => undef, charset => "iso-8859/1"]);
+     join_header_words("text/plain" => undef, charset => "iso-8859/1");
+  
+  will both return the string:
+  
+     text/plain; charset="iso-8859/1"
+  
+  =back
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: Header value parsing utility functions
+  
+HTTP_HEADERS_UTIL
+
+$fatpacked{"HTTP/Message.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_MESSAGE';
+  package HTTP::Message;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  require HTTP::Headers;
+  require Carp;
+  
+  our $MAXIMUM_BODY_SIZE;
+  
+  my $CRLF = "\015\012";   # "\r\n" is not portable
+  unless ($HTTP::URI_CLASS) {
+      if ($ENV{PERL_HTTP_URI_CLASS}
+      &&  $ENV{PERL_HTTP_URI_CLASS} =~ /^([\w:]+)$/) {
+          $HTTP::URI_CLASS = $1;
+      } else {
+          $HTTP::URI_CLASS = "URI";
+      }
+  }
+  eval "require $HTTP::URI_CLASS"; die $@ if $@;
+  
+  *_utf8_downgrade = defined(&utf8::downgrade) ?
+      sub {
+          utf8::downgrade($_[0], 1) or
+              Carp::croak("HTTP::Message content must be bytes")
+      }
+      :
+      sub {
+      };
+  
+  sub new
+  {
+      my($class, $header, $content) = @_;
+      if (defined $header) {
+  	Carp::croak("Bad header argument") unless ref $header;
+          if (ref($header) eq "ARRAY") {
+  	    $header = HTTP::Headers->new(@$header);
+  	}
+  	else {
+  	    $header = $header->clone;
+  	}
+      }
+      else {
+  	$header = HTTP::Headers->new;
+      }
+      if (defined $content) {
+          _utf8_downgrade($content);
+      }
+      else {
+          $content = '';
+      }
+  
+      bless {
+  	'_headers' => $header,
+  	'_content' => $content,
+  	'_max_body_size' => $HTTP::Message::MAXIMUM_BODY_SIZE,
+      }, $class;
+  }
+  
+  sub parse
+  {
+      my($class, $str) = @_;
+  
+      my @hdr;
+      while (1) {
+  	if ($str =~ s/^([^\s:]+)[ \t]*: ?(.*)\n?//) {
+  	    push(@hdr, $1, $2);
+  	    $hdr[-1] =~ s/\r\z//;
+  	}
+  	elsif (@hdr && $str =~ s/^([ \t].*)\n?//) {
+  	    $hdr[-1] .= "\n$1";
+  	    $hdr[-1] =~ s/\r\z//;
+  	}
+  	else {
+  	    $str =~ s/^\r?\n//;
+  	    last;
+  	}
+      }
+      local $HTTP::Headers::TRANSLATE_UNDERSCORE;
+      new($class, \@hdr, $str);
+  }
+  
+  
+  sub clone
+  {
+      my $self  = shift;
+      my $clone = HTTP::Message->new($self->headers,
+  				   $self->content);
+      $clone->protocol($self->protocol);
+      $clone;
+  }
+  
+  
+  sub clear {
+      my $self = shift;
+      $self->{_headers}->clear;
+      $self->content("");
+      delete $self->{_parts};
+      return;
+  }
+  
+  
+  sub protocol {
+      shift->_elem('_protocol',  @_);
+  }
+  
+  sub headers {
+      my $self = shift;
+  
+      # recalculation of _content might change headers, so we
+      # need to force it now
+      $self->_content unless exists $self->{_content};
+  
+      $self->{_headers};
+  }
+  
+  sub headers_as_string {
+      shift->headers->as_string(@_);
+  }
+  
+  
+  sub content  {
+  
+      my $self = $_[0];
+      if (defined(wantarray)) {
+  	$self->_content unless exists $self->{_content};
+  	my $old = $self->{_content};
+  	$old = $$old if ref($old) eq "SCALAR";
+  	&_set_content if @_ > 1;
+  	return $old;
+      }
+  
+      if (@_ > 1) {
+  	&_set_content;
+      }
+      else {
+  	Carp::carp("Useless content call in void context") if $^W;
+      }
+  }
+  
+  
+  sub _set_content {
+      my $self = $_[0];
+      _utf8_downgrade($_[1]);
+      if (!ref($_[1]) && ref($self->{_content}) eq "SCALAR") {
+  	${$self->{_content}} = defined( $_[1] ) ? $_[1] : '';
+      }
+      else {
+  	die "Can't set content to be a scalar reference" if ref($_[1]) eq "SCALAR";
+  	$self->{_content} = defined( $_[1] ) ? $_[1] : '';
+  	delete $self->{_content_ref};
+      }
+      delete $self->{_parts} unless $_[2];
+  }
+  
+  
+  sub add_content
+  {
+      my $self = shift;
+      $self->_content unless exists $self->{_content};
+      my $chunkref = \$_[0];
+      $chunkref = $$chunkref if ref($$chunkref);  # legacy
+  
+      _utf8_downgrade($$chunkref);
+  
+      my $ref = ref($self->{_content});
+      if (!$ref) {
+  	$self->{_content} .= $$chunkref;
+      }
+      elsif ($ref eq "SCALAR") {
+  	${$self->{_content}} .= $$chunkref;
+      }
+      else {
+  	Carp::croak("Can't append to $ref content");
+      }
+      delete $self->{_parts};
+  }
+  
+  sub add_content_utf8 {
+      my($self, $buf)  = @_;
+      utf8::upgrade($buf);
+      utf8::encode($buf);
+      $self->add_content($buf);
+  }
+  
+  sub content_ref
+  {
+      my $self = shift;
+      $self->_content unless exists $self->{_content};
+      delete $self->{_parts};
+      my $old = \$self->{_content};
+      my $old_cref = $self->{_content_ref};
+      if (@_) {
+  	my $new = shift;
+  	Carp::croak("Setting content_ref to a non-ref") unless ref($new);
+  	delete $self->{_content};  # avoid modifying $$old
+  	$self->{_content} = $new;
+  	$self->{_content_ref}++;
+      }
+      $old = $$old if $old_cref;
+      return $old;
+  }
+  
+  
+  sub content_charset
+  {
+      my $self = shift;
+      if (my $charset = $self->content_type_charset) {
+  	return $charset;
+      }
+  
+      # time to start guessing
+      my $cref = $self->decoded_content(ref => 1, charset => "none");
+  
+      # Unicode BOM
+      for ($$cref) {
+  	return "UTF-8"     if /^\xEF\xBB\xBF/;
+  	return "UTF-32LE" if /^\xFF\xFE\x00\x00/;
+  	return "UTF-32BE" if /^\x00\x00\xFE\xFF/;
+  	return "UTF-16LE" if /^\xFF\xFE/;
+  	return "UTF-16BE" if /^\xFE\xFF/;
+      }
+  
+      if ($self->content_is_xml) {
+  	# http://www.w3.org/TR/2006/REC-xml-20060816/#sec-guessing
+  	# XML entity not accompanied by external encoding information and not
+  	# in UTF-8 or UTF-16 encoding must begin with an XML encoding declaration,
+  	# in which the first characters must be '<?xml'
+  	for ($$cref) {
+  	    return "UTF-32BE" if /^\x00\x00\x00</;
+  	    return "UTF-32LE" if /^<\x00\x00\x00/;
+  	    return "UTF-16BE" if /^(?:\x00\s)*\x00</;
+  	    return "UTF-16LE" if /^(?:\s\x00)*<\x00/;
+  	    if (/^\s*(<\?xml[^\x00]*?\?>)/) {
+  		if ($1 =~ /\sencoding\s*=\s*(["'])(.*?)\1/) {
+  		    my $enc = $2;
+  		    $enc =~ s/^\s+//; $enc =~ s/\s+\z//;
+  		    return $enc if $enc;
+  		}
+  	    }
+  	}
+  	return "UTF-8";
+      }
+      elsif ($self->content_is_html) {
+  	# look for <META charset="..."> or <META content="...">
+  	# http://dev.w3.org/html5/spec/Overview.html#determining-the-character-encoding
+  	require IO::HTML;
+  	# Use relaxed search to match previous versions of HTTP::Message:
+  	my $encoding = IO::HTML::find_charset_in($$cref, { encoding    => 1,
+  	                                                   need_pragma => 0 });
+  	return $encoding->mime_name if $encoding;
+      }
+      elsif ($self->content_type eq "application/json") {
+  	for ($$cref) {
+  	    # RFC 4627, ch 3
+  	    return "UTF-32BE" if /^\x00\x00\x00./s;
+  	    return "UTF-32LE" if /^.\x00\x00\x00/s;
+  	    return "UTF-16BE" if /^\x00.\x00./s;
+  	    return "UTF-16LE" if /^.\x00.\x00/s;
+  	    return "UTF-8";
+  	}
+      }
+      if ($self->content_type =~ /^text\//) {
+  	for ($$cref) {
+  	    if (length) {
+  		return "US-ASCII" unless /[\x80-\xFF]/;
+  		require Encode;
+  		eval {
+  		    Encode::decode_utf8($_, Encode::FB_CROAK() | Encode::LEAVE_SRC());
+  		};
+  		return "UTF-8" unless $@;
+  		return "ISO-8859-1";
+  	    }
+  	}
+      }
+  
+      return undef;
+  }
+  
+  sub max_body_size  {
+      my $self = $_[0];
+      my $old = $self->{_max_body_size};
+      $self->_set_max_body_size($_[1]) if @_ > 1;
+      return $old;
+  }
+  
+  sub _set_max_body_size {
+      my $self = $_[0];
+      $self->{_max_body_size} = $_[1];
+  }
+  
+  sub decoded_content
+  {
+      my($self, %opt) = @_;
+      my $content_ref;
+      my $content_ref_iscopy;
+  
+      eval {
+  	$content_ref = $self->content_ref;
+  	die "Can't decode ref content" if ref($content_ref) ne "SCALAR";
+  
+  	my $content_limit = exists $opt{ max_body_size } ? $opt{ max_body_size }
+  			: defined $self->max_body_size ? $self->max_body_size
+  			: undef
+  			;
+  	my %limiter_options;
+  	if( defined $content_limit ) {
+  	    %limiter_options = (LimitOutput => 1, Bufsize => $content_limit);
+  	};
+  	if (my $h = $self->header("Content-Encoding")) {
+  	    $h =~ s/^\s+//;
+  	    $h =~ s/\s+$//;
+  	    for my $ce (reverse split(/\s*,\s*/, lc($h))) {
+  		next unless $ce;
+  		next if $ce eq "identity" || $ce eq "none";
+  		if ($ce eq "gzip" || $ce eq "x-gzip") {
+  		    require Compress::Raw::Zlib; # 'WANT_GZIP_OR_ZLIB', 'Z_BUF_ERROR';
+  
+  		    if( ! $content_ref_iscopy and keys %limiter_options) {
+  			# Create a copy of the input because Zlib will overwrite it
+  			# :-(
+  			my $input = "$$content_ref";
+  			$content_ref = \$input;
+  			$content_ref_iscopy++;
+  		    };
+  		    my ($i, $status) = Compress::Raw::Zlib::Inflate->new(
+  			%limiter_options,
+  			ConsumeInput => 0, # overridden by Zlib if we have %limiter_options :-(
+  			WindowBits => Compress::Raw::Zlib::WANT_GZIP_OR_ZLIB(),
+  		    );
+  		    my $res = $i->inflate( $content_ref, \my $output );
+  		    $res == Compress::Raw::Zlib::Z_BUF_ERROR()
+  			and Carp::croak("Decoded content would be larger than $content_limit octets");
+  		    $res == Compress::Raw::Zlib::Z_OK()
+  		    or $res == Compress::Raw::Zlib::Z_STREAM_END()
+  		    or die "Can't gunzip content: $res";
+  		    $content_ref = \$output;
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq 'br') {
+  		    require IO::Uncompress::Brotli;
+  		    my $bro = IO::Uncompress::Brotli->create;
+  
+  		    my $output;
+  		    if( defined $content_limit ) {
+  			$output = eval { $bro->decompress( $$content_ref, $content_limit ); }
+  		    } else {
+  			$output = eval { $bro->decompress($$content_ref) };
+  		    }
+  
+  		    $@ and die "Can't unbrotli content: $@";
+  		    $content_ref = \$output;
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq "x-bzip2" or $ce eq "bzip2") {
+  		    require Compress::Raw::Bzip2;
+  
+  		    if( ! $content_ref_iscopy ) {
+  			# Create a copy of the input because Bzlib2 will overwrite it
+  			# :-(
+  			my $input = "$$content_ref";
+  			$content_ref = \$input;
+  			$content_ref_iscopy++;
+  		    };
+  		    my ($i, $status) = Compress::Raw::Bunzip2->new(
+  			1, # appendInput
+  			0, # consumeInput
+  			0, # small
+  			$limiter_options{ LimitOutput } || 0,
+  		    );
+  		    my $output;
+  		    $output = "\0" x $limiter_options{ Bufsize }
+  			if $limiter_options{ Bufsize };
+  		    my $res = $i->bzinflate( $content_ref, \$output );
+  		    $res == Compress::Raw::Bzip2::BZ_OUTBUFF_FULL()
+  			and Carp::croak("Decoded content would be larger than $content_limit octets");
+  		    $res == Compress::Raw::Bzip2::BZ_OK()
+  		    or $res == Compress::Raw::Bzip2::BZ_STREAM_END()
+  			or die "Can't bunzip content: $res";
+  			    $content_ref = \$output;
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq "deflate") {
+  		    require IO::Uncompress::Inflate;
+  		    my $output;
+  		    my $status = IO::Uncompress::Inflate::inflate($content_ref, \$output, Transparent => 0);
+  		    my $error = $IO::Uncompress::Inflate::InflateError;
+  		    unless ($status) {
+  			# "Content-Encoding: deflate" is supposed to mean the
+  			# "zlib" format of RFC 1950, but Microsoft got that
+  			# wrong, so some servers sends the raw compressed
+  			# "deflate" data.  This tries to inflate this format.
+  			$output = undef;
+  			require IO::Uncompress::RawInflate;
+  			unless (IO::Uncompress::RawInflate::rawinflate($content_ref, \$output)) {
+  			    $self->push_header("Client-Warning" =>
+  				"Could not raw inflate content: $IO::Uncompress::RawInflate::RawInflateError");
+  			    $output = undef;
+  			}
+  		    }
+  		    die "Can't inflate content: $error" unless defined $output;
+  		    $content_ref = \$output;
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq "compress" || $ce eq "x-compress") {
+  		    die "Can't uncompress content";
+  		}
+  		elsif ($ce eq "base64") {  # not really C-T-E, but should be harmless
+  		    require MIME::Base64;
+  		    $content_ref = \MIME::Base64::decode($$content_ref);
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq "quoted-printable") { # not really C-T-E, but should be harmless
+  		    require MIME::QuotedPrint;
+  		    $content_ref = \MIME::QuotedPrint::decode($$content_ref);
+  		    $content_ref_iscopy++;
+  		}
+  		else {
+  		    die "Don't know how to decode Content-Encoding '$ce'";
+  		}
+  	    }
+  	}
+  
+  	if ($self->content_is_text || (my $is_xml = $self->content_is_xml)) {
+  	    my $charset = lc(
+  	        $opt{charset} ||
+  		$self->content_type_charset ||
+  		$opt{default_charset} ||
+  		$self->content_charset ||
+  		"ISO-8859-1"
+  	    );
+  	    if ($charset eq "none") {
+  		# leave it as is
+  	    }
+  	    elsif ($charset eq "us-ascii" || $charset eq "iso-8859-1") {
+  		if ($$content_ref =~ /[^\x00-\x7F]/ && defined &utf8::upgrade) {
+  		    unless ($content_ref_iscopy) {
+  			my $copy = $$content_ref;
+  			$content_ref = \$copy;
+  			$content_ref_iscopy++;
+  		    }
+  		    utf8::upgrade($$content_ref);
+  		}
+  	    }
+  	    else {
+  		require Encode;
+  		eval {
+  		    $content_ref = \Encode::decode($charset, $$content_ref,
+  			 ($opt{charset_strict} ? Encode::FB_CROAK() : 0) | Encode::LEAVE_SRC());
+  		};
+  		if ($@) {
+  		    my $retried;
+  		    if ($@ =~ /^Unknown encoding/) {
+  			my $alt_charset = lc($opt{alt_charset} || "");
+  			if ($alt_charset && $charset ne $alt_charset) {
+  			    # Retry decoding with the alternative charset
+  			    $content_ref = \Encode::decode($alt_charset, $$content_ref,
+  				 ($opt{charset_strict} ? Encode::FB_CROAK() : 0) | Encode::LEAVE_SRC())
+  			        unless $alt_charset eq "none";
+  			    $retried++;
+  			}
+  		    }
+  		    die unless $retried;
+  		}
+  		die "Encode::decode() returned undef improperly" unless defined $$content_ref;
+  		if ($is_xml) {
+  		    # Get rid of the XML encoding declaration if present
+  		    $$content_ref =~ s/^\x{FEFF}//;
+  		    if ($$content_ref =~ /^(\s*<\?xml[^\x00]*?\?>)/) {
+  			substr($$content_ref, 0, length($1)) =~ s/\sencoding\s*=\s*(["']).*?\1//;
+  		    }
+  		}
+  	    }
+  	}
+      };
+      if ($@) {
+  	Carp::croak($@) if $opt{raise_error};
+  	return undef;
+      }
+  
+      return $opt{ref} ? $content_ref : $$content_ref;
+  }
+  
+  
+  sub decodable
+  {
+      # should match the Content-Encoding values that decoded_content can deal with
+      my $self = shift;
+      my @enc;
+      local $@;
+      # XXX preferably we should determine if the modules are available without loading
+      # them here
+      eval {
+          require Compress::Raw::Zlib;
+          push(@enc, "gzip", "x-gzip");
+      };
+      eval {
+          require IO::Uncompress::Inflate;
+          require IO::Uncompress::RawInflate;
+          push(@enc, "deflate");
+      };
+      eval {
+          require Compress::Raw::Bzip2;
+          push(@enc, "x-bzip2", "bzip2");
+      };
+      eval {
+          require IO::Uncompress::Brotli;
+          push(@enc, 'br');
+      };
+      # we don't care about announcing the 'identity', 'base64' and
+      # 'quoted-printable' stuff
+      return wantarray ? @enc : join(", ", @enc);
+  }
+  
+  
+  sub decode
+  {
+      my $self = shift;
+      return 1 unless $self->header("Content-Encoding");
+      if (defined(my $content = $self->decoded_content(charset => "none"))) {
+  	$self->remove_header("Content-Encoding", "Content-Length", "Content-MD5");
+  	$self->content($content);
+  	return 1;
+      }
+      return 0;
+  }
+  
+  
+  sub encode
+  {
+      my($self, @enc) = @_;
+  
+      Carp::croak("Can't encode multipart/* messages") if $self->content_type =~ m,^multipart/,;
+      Carp::croak("Can't encode message/* messages") if $self->content_type =~ m,^message/,;
+  
+      return 1 unless @enc;  # nothing to do
+  
+      my $content = $self->content;
+      for my $encoding (@enc) {
+  	if ($encoding eq "identity" || $encoding eq "none") {
+  	    # nothing to do
+  	}
+  	elsif ($encoding eq "base64") {
+  	    require MIME::Base64;
+  	    $content = MIME::Base64::encode($content);
+  	}
+  	elsif ($encoding eq "gzip" || $encoding eq "x-gzip") {
+  	    require IO::Compress::Gzip;
+  	    my $output;
+  	    IO::Compress::Gzip::gzip(\$content, \$output, Minimal => 1)
+  		or die "Can't gzip content: $IO::Compress::Gzip::GzipError";
+  	    $content = $output;
+  	}
+  	elsif ($encoding eq "deflate") {
+  	    require IO::Compress::Deflate;
+  	    my $output;
+  	    IO::Compress::Deflate::deflate(\$content, \$output)
+  		or die "Can't deflate content: $IO::Compress::Deflate::DeflateError";
+  	    $content = $output;
+  	}
+  	elsif ($encoding eq "x-bzip2" || $encoding eq "bzip2") {
+  	    require IO::Compress::Bzip2;
+  	    my $output;
+  	    IO::Compress::Bzip2::bzip2(\$content, \$output)
+  		or die "Can't bzip2 content: $IO::Compress::Bzip2::Bzip2Error";
+  	    $content = $output;
+  	}
+  	elsif ($encoding eq "br") {
+  		require IO::Compress::Brotli;
+  		my $output;
+  		eval { $output = IO::Compress::Brotli::bro($content) }
+  		or die "Can't brotli content: $@";
+  		$content = $output;
+  	}
+  	elsif ($encoding eq "rot13") {  # for the fun of it
+  	    $content =~ tr/A-Za-z/N-ZA-Mn-za-m/;
+  	}
+  	else {
+  	    return 0;
+  	}
+      }
+      my $h = $self->header("Content-Encoding");
+      unshift(@enc, $h) if $h;
+      $self->header("Content-Encoding", join(", ", @enc));
+      $self->remove_header("Content-Length", "Content-MD5");
+      $self->content($content);
+      return 1;
+  }
+  
+  
+  sub as_string
+  {
+      my($self, $eol) = @_;
+      $eol = "\n" unless defined $eol;
+  
+      # The calculation of content might update the headers
+      # so we need to do that first.
+      my $content = $self->content;
+  
+      return join("", $self->{'_headers'}->as_string($eol),
+  		    $eol,
+  		    $content,
+  		    (@_ == 1 && length($content) &&
+  		     $content !~ /\n\z/) ? "\n" : "",
+  		);
+  }
+  
+  
+  sub dump
+  {
+      my($self, %opt) = @_;
+      my $content = $self->content;
+      my $chopped = 0;
+      if (!ref($content)) {
+  	my $maxlen = $opt{maxlength};
+  	$maxlen = 512 unless defined($maxlen);
+  	if ($maxlen && length($content) > $maxlen * 1.1 + 3) {
+  	    $chopped = length($content) - $maxlen;
+  	    $content = substr($content, 0, $maxlen) . "...";
+  	}
+  
+  	$content =~ s/\\/\\\\/g;
+  	$content =~ s/\t/\\t/g;
+  	$content =~ s/\r/\\r/g;
+  
+  	# no need for 3 digits in escape for these
+  	$content =~ s/([\0-\11\13-\037])(?!\d)/sprintf('\\%o',ord($1))/eg;
+  
+  	$content =~ s/([\0-\11\13-\037\177-\377])/sprintf('\\x%02X',ord($1))/eg;
+  	$content =~ s/([^\12\040-\176])/sprintf('\\x{%X}',ord($1))/eg;
+  
+  	# remaining whitespace
+  	$content =~ s/( +)\n/("\\40" x length($1)) . "\n"/eg;
+  	$content =~ s/(\n+)\n/("\\n" x length($1)) . "\n"/eg;
+  	$content =~ s/\n\z/\\n/;
+  
+  	my $no_content = $opt{no_content};
+  	$no_content = "(no content)" unless defined $no_content;
+  	if ($content eq $no_content) {
+  	    # escape our $no_content marker
+  	    $content =~ s/^(.)/sprintf('\\x%02X',ord($1))/eg;
+  	}
+  	elsif ($content eq "") {
+  	    $content = $no_content;
+  	}
+      }
+  
+      my @dump;
+      push(@dump, $opt{preheader}) if $opt{preheader};
+      push(@dump, $self->{_headers}->as_string, $content);
+      push(@dump, "(+ $chopped more bytes not shown)") if $chopped;
+  
+      my $dump = join("\n", @dump, "");
+      $dump =~ s/^/$opt{prefix}/gm if $opt{prefix};
+  
+      print $dump unless defined wantarray;
+      return $dump;
+  }
+  
+  # allow subclasses to override what will handle individual parts
+  sub _part_class {
+      return __PACKAGE__;
+  }
+  
+  sub parts {
+      my $self = shift;
+      if (defined(wantarray) && (!exists $self->{_parts} || ref($self->{_content}) eq "SCALAR")) {
+  	$self->_parts;
+      }
+      my $old = $self->{_parts};
+      if (@_) {
+  	my @parts = map { ref($_) eq 'ARRAY' ? @$_ : $_ } @_;
+  	my $ct = $self->content_type || "";
+  	if ($ct =~ m,^message/,) {
+  	    Carp::croak("Only one part allowed for $ct content")
+  		if @parts > 1;
+  	}
+  	elsif ($ct !~ m,^multipart/,) {
+  	    $self->remove_content_headers;
+  	    $self->content_type("multipart/mixed");
+  	}
+  	$self->{_parts} = \@parts;
+  	_stale_content($self);
+      }
+      return @$old if wantarray;
+      return $old->[0];
+  }
+  
+  sub add_part {
+      my $self = shift;
+      if (($self->content_type || "") !~ m,^multipart/,) {
+  	my $p = $self->_part_class->new(
+  	    $self->remove_content_headers,
+  	    $self->content(""),
+  	);
+  	$self->content_type("multipart/mixed");
+  	$self->{_parts} = [];
+          if ($p->headers->header_field_names || $p->content ne "") {
+              push(@{$self->{_parts}}, $p);
+          }
+      }
+      elsif (!exists $self->{_parts} || ref($self->{_content}) eq "SCALAR") {
+  	$self->_parts;
+      }
+  
+      push(@{$self->{_parts}}, @_);
+      _stale_content($self);
+      return;
+  }
+  
+  sub _stale_content {
+      my $self = shift;
+      if (ref($self->{_content}) eq "SCALAR") {
+  	# must recalculate now
+  	$self->_content;
+      }
+      else {
+  	# just invalidate cache
+  	delete $self->{_content};
+  	delete $self->{_content_ref};
+      }
+  }
+  
+  # delegate all other method calls to the headers object.
+  our $AUTOLOAD;
+  
+  sub AUTOLOAD {
+      my ( $package, $method ) = $AUTOLOAD =~ m/\A(.+)::([^:]*)\z/;
+      my $code = $_[0]->can($method);
+      Carp::croak(
+          qq(Can't locate object method "$method" via package "$package"))
+          unless $code;
+      goto &$code;
+  }
+  
+  sub can {
+      my ( $self, $method ) = @_;
+  
+      if ( my $own_method = $self->SUPER::can($method) ) {
+          return $own_method;
+      }
+  
+      my $headers = ref($self) ? $self->headers : 'HTTP::Headers';
+      if ( $headers->can($method) ) {
+  
+          # We create the function here so that it will not need to be
+          # autoloaded or recreated the next time.
+          no strict 'refs';
+          *$method = sub {
+              local $Carp::Internal{ +__PACKAGE__ } = 1;
+              shift->headers->$method(@_);
+          };
+          return \&$method;
+      }
+  
+      return undef;
+  }
+  
+  sub DESTROY { }    # avoid AUTOLOADing it
+  
+  # Private method to access members in %$self
+  sub _elem
+  {
+      my $self = shift;
+      my $elem = shift;
+      my $old = $self->{$elem};
+      $self->{$elem} = $_[0] if @_;
+      return $old;
+  }
+  
+  
+  # Create private _parts attribute from current _content
+  sub _parts {
+      my $self = shift;
+      my $ct = $self->content_type;
+      if ($ct =~ m,^multipart/,) {
+  	require HTTP::Headers::Util;
+  	my @h = HTTP::Headers::Util::split_header_words($self->header("Content-Type"));
+  	die "Assert" unless @h;
+  	my %h = @{$h[0]};
+  	if (defined(my $b = $h{boundary})) {
+  	    my $str = $self->content;
+  	    $str =~ s/\r?\n--\Q$b\E--.*//s;
+  	    if ($str =~ s/(^|.*?\r?\n)--\Q$b\E\r?\n//s) {
+  		$self->{_parts} = [map $self->_part_class->parse($_),
+  				   split(/\r?\n--\Q$b\E\r?\n/, $str)]
+  	    }
+  	}
+      }
+      elsif ($ct eq "message/http") {
+  	require HTTP::Request;
+  	require HTTP::Response;
+  	my $content = $self->content;
+  	my $class = ($content =~ m,^(HTTP/.*)\n,) ?
+  	    "HTTP::Response" : "HTTP::Request";
+  	$self->{_parts} = [$class->parse($content)];
+      }
+      elsif ($ct =~ m,^message/,) {
+  	$self->{_parts} = [ $self->_part_class->parse($self->content) ];
+      }
+  
+      $self->{_parts} ||= [];
+  }
+  
+  
+  # Create private _content attribute from current _parts
+  sub _content {
+      my $self = shift;
+      my $ct = $self->{_headers}->header("Content-Type") || "multipart/mixed";
+      if ($ct =~ m,^\s*message/,i) {
+  	_set_content($self, $self->{_parts}[0]->as_string($CRLF), 1);
+  	return;
+      }
+  
+      require HTTP::Headers::Util;
+      my @v = HTTP::Headers::Util::split_header_words($ct);
+      Carp::carp("Multiple Content-Type headers") if @v > 1;
+      @v = @{$v[0]};
+  
+      my $boundary;
+      my $boundary_index;
+      for (my @tmp = @v; @tmp;) {
+  	my($k, $v) = splice(@tmp, 0, 2);
+  	if ($k eq "boundary") {
+  	    $boundary = $v;
+  	    $boundary_index = @v - @tmp - 1;
+  	    last;
+  	}
+      }
+  
+      my @parts = map $_->as_string($CRLF), @{$self->{_parts}};
+  
+      my $bno = 0;
+      $boundary = _boundary() unless defined $boundary;
+   CHECK_BOUNDARY:
+      {
+  	for (@parts) {
+  	    if (index($_, $boundary) >= 0) {
+  		# must have a better boundary
+  		$boundary = _boundary(++$bno);
+  		redo CHECK_BOUNDARY;
+  	    }
+  	}
+      }
+  
+      if ($boundary_index) {
+  	$v[$boundary_index] = $boundary;
+      }
+      else {
+  	push(@v, boundary => $boundary);
+      }
+  
+      $ct = HTTP::Headers::Util::join_header_words(@v);
+      $self->{_headers}->header("Content-Type", $ct);
+  
+      _set_content($self, "--$boundary$CRLF" .
+  	                join("$CRLF--$boundary$CRLF", @parts) .
+  			"$CRLF--$boundary--$CRLF",
+                          1);
+  }
+  
+  
+  sub _boundary
+  {
+      my $size = shift || return "xYzZY";
+      require MIME::Base64;
+      my $b = MIME::Base64::encode(join("", map chr(rand(256)), 1..$size*3), "");
+      $b =~ s/[\W]/X/g;  # ensure alnum only
+      $b;
+  }
+  
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Message - HTTP style message (base class)
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 SYNOPSIS
+  
+   use parent 'HTTP::Message';
+  
+  =head1 DESCRIPTION
+  
+  An C<HTTP::Message> object contains some headers and a content body.
+  The following methods are available:
+  
+  =over 4
+  
+  =item $mess = HTTP::Message->new
+  
+  =item $mess = HTTP::Message->new( $headers )
+  
+  =item $mess = HTTP::Message->new( $headers, $content )
+  
+  This constructs a new message object.  Normally you would want
+  construct C<HTTP::Request> or C<HTTP::Response> objects instead.
+  
+  The optional $header argument should be a reference to an
+  C<HTTP::Headers> object or a plain array reference of key/value pairs.
+  If an C<HTTP::Headers> object is provided then a copy of it will be
+  embedded into the constructed message, i.e. it will not be owned and
+  can be modified afterwards without affecting the message.
+  
+  The optional $content argument should be a string of bytes.
+  
+  =item $mess = HTTP::Message->parse( $str )
+  
+  This constructs a new message object by parsing the given string.
+  
+  =item $mess->headers
+  
+  Returns the embedded C<HTTP::Headers> object.
+  
+  =item $mess->headers_as_string
+  
+  =item $mess->headers_as_string( $eol )
+  
+  Call the as_string() method for the headers in the
+  message.  This will be the same as
+  
+      $mess->headers->as_string
+  
+  but it will make your program a whole character shorter :-)
+  
+  =item $mess->content
+  
+  =item $mess->content( $bytes )
+  
+  The content() method sets the raw content if an argument is given.  If no
+  argument is given the content is not touched.  In either case the
+  original raw content is returned.
+  
+  If the C<undef> argument is given, the content is reset to its default value,
+  which is an empty string.
+  
+  Note that the content should be a string of bytes.  Strings in perl
+  can contain characters outside the range of a byte.  The C<Encode>
+  module can be used to turn such strings into a string of bytes.
+  
+  =item $mess->add_content( $bytes )
+  
+  The add_content() methods appends more data bytes to the end of the
+  current content buffer.
+  
+  =item $mess->add_content_utf8( $string )
+  
+  The add_content_utf8() method appends the UTF-8 bytes representing the
+  string to the end of the current content buffer.
+  
+  =item $mess->content_ref
+  
+  =item $mess->content_ref( \$bytes )
+  
+  The content_ref() method will return a reference to content buffer string.
+  It can be more efficient to access the content this way if the content
+  is huge, and it can even be used for direct manipulation of the content,
+  for instance:
+  
+    ${$res->content_ref} =~ s/\bfoo\b/bar/g;
+  
+  This example would modify the content buffer in-place.
+  
+  If an argument is passed it will setup the content to reference some
+  external source.  The content() and add_content() methods
+  will automatically dereference scalar references passed this way.  For
+  other references content() will return the reference itself and
+  add_content() will refuse to do anything.
+  
+  =item $mess->content_charset
+  
+  This returns the charset used by the content in the message.  The
+  charset is either found as the charset attribute of the
+  C<Content-Type> header or by guessing.
+  
+  See L<http://www.w3.org/TR/REC-html40/charset.html#spec-char-encoding>
+  for details about how charset is determined.
+  
+  =item $mess->decoded_content( %options )
+  
+  Returns the content with any C<Content-Encoding> undone and, for textual content
+  (C<Content-Type> values starting with C<text/>, exactly matching
+  C<application/xml>, or ending with C<+xml>), the raw content's character set
+  decoded into Perl's Unicode string format. Note that this
+  L<does not currently|https://github.com/libwww-perl/HTTP-Message/pull/99>
+  attempt to decode declared character sets for any other content types like
+  C<application/json> or C<application/javascript>.  If the C<Content-Encoding>
+  or C<charset> of the message is unknown, this method will fail by returning
+  C<undef>.
+  
+  The following options can be specified.
+  
+  =over
+  
+  =item C<charset>
+  
+  This overrides the charset parameter for text content.  The value
+  C<none> can used to suppress decoding of the charset.
+  
+  =item C<default_charset>
+  
+  This overrides the default charset guessed by content_charset() or
+  if that fails "ISO-8859-1".
+  
+  =item C<alt_charset>
+  
+  If decoding fails because the charset specified in the Content-Type header
+  isn't recognized by Perl's Encode module, then try decoding using this charset
+  instead of failing.  The C<alt_charset> might be specified as C<none> to simply
+  return the string without any decoding of charset as alternative.
+  
+  =item C<charset_strict>
+  
+  Abort decoding if malformed characters is found in the content.  By
+  default you get the substitution character ("\x{FFFD}") in place of
+  malformed characters.
+  
+  =item C<raise_error>
+  
+  If TRUE then raise an exception if not able to decode content.  Reason
+  might be that the specified C<Content-Encoding> or C<charset> is not
+  supported.  If this option is FALSE, then decoded_content() will return
+  C<undef> on errors, but will still set $@.
+  
+  =item C<ref>
+  
+  If TRUE then a reference to decoded content is returned.  This might
+  be more efficient in cases where the decoded content is identical to
+  the raw content as no data copying is required in this case.
+  
+  =back
+  
+  =item $mess->decodable
+  
+  =item HTTP::Message::decodable()
+  
+  This returns the encoding identifiers that decoded_content() can
+  process.  In scalar context returns a comma separated string of
+  identifiers.
+  
+  This value is suitable for initializing the C<Accept-Encoding> request
+  header field.
+  
+  =item $mess->decode
+  
+  This method tries to replace the content of the message with the
+  decoded version and removes the C<Content-Encoding> header.  Returns
+  TRUE if successful and FALSE if not.
+  
+  If the message does not have a C<Content-Encoding> header this method
+  does nothing and returns TRUE.
+  
+  Note that the content of the message is still bytes after this method
+  has been called and you still need to call decoded_content() if you
+  want to process its content as a string.
+  
+  =item $mess->encode( $encoding, ... )
+  
+  Apply the given encodings to the content of the message.  Returns TRUE
+  if successful. The "identity" (non-)encoding is always supported; other
+  currently supported encodings, subject to availability of required
+  additional modules, are "gzip", "deflate", "x-bzip2", "base64" and "br".
+  
+  A successful call to this function will set the C<Content-Encoding>
+  header.
+  
+  Note that C<multipart/*> or C<message/*> messages can't be encoded and
+  this method will croak if you try.
+  
+  =item $mess->parts
+  
+  =item $mess->parts( @parts )
+  
+  =item $mess->parts( \@parts )
+  
+  Messages can be composite, i.e. contain other messages.  The composite
+  messages have a content type of C<multipart/*> or C<message/*>.  This
+  method give access to the contained messages.
+  
+  The argumentless form will return a list of C<HTTP::Message> objects.
+  If the content type of $msg is not C<multipart/*> or C<message/*> then
+  this will return the empty list.  In scalar context only the first
+  object is returned.  The returned message parts should be regarded as
+  read-only (future versions of this library might make it possible
+  to modify the parent by modifying the parts).
+  
+  If the content type of $msg is C<message/*> then there will only be
+  one part returned.
+  
+  If the content type is C<message/http>, then the return value will be
+  either an C<HTTP::Request> or an C<HTTP::Response> object.
+  
+  If a @parts argument is given, then the content of the message will be
+  modified. The array reference form is provided so that an empty list
+  can be provided.  The @parts array should contain C<HTTP::Message>
+  objects.  The @parts objects are owned by $mess after this call and
+  should not be modified or made part of other messages.
+  
+  When updating the message with this method and the old content type of
+  $mess is not C<multipart/*> or C<message/*>, then the content type is
+  set to C<multipart/mixed> and all other content headers are cleared.
+  
+  This method will croak if the content type is C<message/*> and more
+  than one part is provided.
+  
+  =item $mess->add_part( $part )
+  
+  This will add a part to a message.  The $part argument should be
+  another C<HTTP::Message> object.  If the previous content type of
+  $mess is not C<multipart/*> then the old content (together with all
+  content headers) will be made part #1 and the content type made
+  C<multipart/mixed> before the new part is added.  The $part object is
+  owned by $mess after this call and should not be modified or made part
+  of other messages.
+  
+  There is no return value.
+  
+  =item $mess->clear
+  
+  Will clear the headers and set the content to the empty string.  There
+  is no return value
+  
+  =item $mess->protocol
+  
+  =item $mess->protocol( $proto )
+  
+  Sets the HTTP protocol used for the message.  The protocol() is a string
+  like C<HTTP/1.0> or C<HTTP/1.1>.
+  
+  =item $mess->clone
+  
+  Returns a copy of the message object.
+  
+  =item $mess->as_string
+  
+  =item $mess->as_string( $eol )
+  
+  Returns the message formatted as a single string.
+  
+  The optional $eol parameter specifies the line ending sequence to use.
+  The default is "\n".  If no $eol is given then as_string will ensure
+  that the returned string is newline terminated (even when the message
+  content is not).  No extra newline is appended if an explicit $eol is
+  passed.
+  
+  =item $mess->dump( %opt )
+  
+  Returns the message formatted as a string.  In void context print the string.
+  
+  This differs from C<< $mess->as_string >> in that it escapes the bytes
+  of the content so that it's safe to print them and it limits how much
+  content to print.  The escapes syntax used is the same as for Perl's
+  double quoted strings.  If there is no content the string "(no
+  content)" is shown in its place.
+  
+  Options to influence the output can be passed as key/value pairs. The
+  following options are recognized:
+  
+  =over
+  
+  =item maxlength => $num
+  
+  How much of the content to show.  The default is 512.  Set this to 0
+  for unlimited.
+  
+  If the content is longer then the string is chopped at the limit and
+  the string "...\n(### more bytes not shown)" appended.
+  
+  =item no_content => $str
+  
+  Replaces the "(no content)" marker.
+  
+  =item prefix => $str
+  
+  A string that will be prefixed to each line of the dump.
+  
+  =back
+  
+  =back
+  
+  All methods unknown to C<HTTP::Message> itself are delegated to the
+  C<HTTP::Headers> object that is part of every message.  This allows
+  convenient access to these methods.  Refer to L<HTTP::Headers> for
+  details of these methods:
+  
+      $mess->header( $field => $val )
+      $mess->push_header( $field => $val )
+      $mess->init_header( $field => $val )
+      $mess->remove_header( $field )
+      $mess->remove_content_headers
+      $mess->header_field_names
+      $mess->scan( \&doit )
+  
+      $mess->date
+      $mess->expires
+      $mess->if_modified_since
+      $mess->if_unmodified_since
+      $mess->last_modified
+      $mess->content_type
+      $mess->content_encoding
+      $mess->content_length
+      $mess->content_language
+      $mess->title
+      $mess->user_agent
+      $mess->server
+      $mess->from
+      $mess->referer
+      $mess->www_authenticate
+      $mess->authorization
+      $mess->proxy_authorization
+      $mess->authorization_basic
+      $mess->proxy_authorization_basic
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: HTTP style message (base class)
+  
+HTTP_MESSAGE
 
 $fatpacked{"HTTP/Message/PSGI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_MESSAGE_PSGI';
   package HTTP::Message::PSGI;
@@ -5297,6 +7474,1618 @@ $fatpacked{"HTTP/Parser.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTT
   
   1;
 HTTP_PARSER
+
+$fatpacked{"HTTP/Request.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_REQUEST';
+  package HTTP::Request;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  use parent 'HTTP::Message';
+  
+  sub new
+  {
+      my($class, $method, $uri, $header, $content) = @_;
+      my $self = $class->SUPER::new($header, $content);
+      $self->method($method);
+      $self->uri($uri);
+      $self;
+  }
+  
+  
+  sub parse
+  {
+      my($class, $str) = @_;
+      Carp::carp('Undefined argument to parse()') if $^W && ! defined $str;
+      my $request_line;
+      if (defined $str && $str =~ s/^(.*)\n//) {
+  	$request_line = $1;
+      }
+      else {
+  	$request_line = $str;
+  	$str = "";
+      }
+  
+      my $self = $class->SUPER::parse($str);
+      if (defined $request_line) {
+          my($method, $uri, $protocol) = split(' ', $request_line);
+          $self->method($method);
+          $self->uri($uri) if defined($uri);
+          $self->protocol($protocol) if $protocol;
+      }
+      $self;
+  }
+  
+  
+  sub clone
+  {
+      my $self = shift;
+      my $clone = bless $self->SUPER::clone, ref($self);
+      $clone->method($self->method);
+      $clone->uri($self->uri);
+      $clone;
+  }
+  
+  
+  sub method
+  {
+      shift->_elem('_method', @_);
+  }
+  
+  
+  sub uri
+  {
+      my $self = shift;
+      my $old = $self->{'_uri'};
+      if (@_) {
+  	my $uri = shift;
+  	if (!defined $uri) {
+  	    # that's ok
+  	}
+  	elsif (ref $uri) {
+  	    Carp::croak("A URI can't be a " . ref($uri) . " reference")
+  		if ref($uri) eq 'HASH' or ref($uri) eq 'ARRAY';
+  	    Carp::croak("Can't use a " . ref($uri) . " object as a URI")
+  		unless $uri->can('scheme') && $uri->can('canonical');
+  	    $uri = $uri->clone;
+  	    unless ($HTTP::URI_CLASS eq "URI") {
+  		# Argh!! Hate this... old LWP legacy!
+  		eval { local $SIG{__DIE__}; $uri = $uri->abs; };
+  		die $@ if $@ && $@ !~ /Missing base argument/;
+  	    }
+  	}
+  	else {
+  	    $uri = $HTTP::URI_CLASS->new($uri);
+  	}
+  	$self->{'_uri'} = $uri;
+          delete $self->{'_uri_canonical'};
+      }
+      $old;
+  }
+  
+  *url = \&uri;  # legacy
+  
+  sub uri_canonical
+  {
+      my $self = shift;
+  
+      my $uri = $self->{_uri};
+  
+      if (defined (my $canon = $self->{_uri_canonical})) {
+          # early bailout if these are the exact same string;
+          # rely on stringification of the URI objects
+          return $canon if $canon eq $uri;
+      }
+  
+      # otherwise we need to refresh the memoized value
+      $self->{_uri_canonical} = $uri->canonical;
+  }
+  
+  
+  sub accept_decodable
+  {
+      my $self = shift;
+      $self->header("Accept-Encoding", scalar($self->decodable));
+  }
+  
+  sub as_string
+  {
+      my $self = shift;
+      my($eol) = @_;
+      $eol = "\n" unless defined $eol;
+  
+      my $req_line = $self->method || "-";
+      my $uri = $self->uri;
+      $uri = (defined $uri) ? $uri->as_string : "-";
+      $req_line .= " $uri";
+      my $proto = $self->protocol;
+      $req_line .= " $proto" if $proto;
+  
+      return join($eol, $req_line, $self->SUPER::as_string(@_));
+  }
+  
+  sub dump
+  {
+      my $self = shift;
+      my @pre = ($self->method || "-", $self->uri || "-");
+      if (my $prot = $self->protocol) {
+  	push(@pre, $prot);
+      }
+  
+      return $self->SUPER::dump(
+          preheader => join(" ", @pre),
+  	@_,
+      );
+  }
+  
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Request - HTTP style request message
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 SYNOPSIS
+  
+   require HTTP::Request;
+   $request = HTTP::Request->new(GET => 'http://www.example.com/');
+  
+  and usually used like this:
+  
+   $ua = LWP::UserAgent->new;
+   $response = $ua->request($request);
+  
+  =head1 DESCRIPTION
+  
+  C<HTTP::Request> is a class encapsulating HTTP style requests,
+  consisting of a request line, some headers, and a content body. Note
+  that the LWP library uses HTTP style requests even for non-HTTP
+  protocols.  Instances of this class are usually passed to the
+  request() method of an C<LWP::UserAgent> object.
+  
+  C<HTTP::Request> is a subclass of C<HTTP::Message> and therefore
+  inherits its methods.  The following additional methods are available:
+  
+  =over 4
+  
+  =item $r = HTTP::Request->new( $method, $uri )
+  
+  =item $r = HTTP::Request->new( $method, $uri, $header )
+  
+  =item $r = HTTP::Request->new( $method, $uri, $header, $content )
+  
+  Constructs a new C<HTTP::Request> object describing a request on the
+  object $uri using method $method.  The $method argument must be a
+  string.  The $uri argument can be either a string, or a reference to a
+  C<URI> object.  The optional $header argument should be a reference to
+  an C<HTTP::Headers> object or a plain array reference of key/value
+  pairs.  The optional $content argument should be a string of bytes.
+  
+  =item $r = HTTP::Request->parse( $str )
+  
+  This constructs a new request object by parsing the given string.
+  
+  =item $r->method
+  
+  =item $r->method( $val )
+  
+  This is used to get/set the method attribute.  The method should be a
+  short string like "GET", "HEAD", "PUT", "PATCH" or "POST".
+  
+  =item $r->uri
+  
+  =item $r->uri( $val )
+  
+  This is used to get/set the uri attribute.  The $val can be a
+  reference to a URI object or a plain string.  If a string is given,
+  then it should be parsable as an absolute URI.
+  
+  =item $r->header( $field )
+  
+  =item $r->header( $field => $value )
+  
+  This is used to get/set header values and it is inherited from
+  C<HTTP::Headers> via C<HTTP::Message>.  See L<HTTP::Headers> for
+  details and other similar methods that can be used to access the
+  headers.
+  
+  =item $r->accept_decodable
+  
+  This will set the C<Accept-Encoding> header to the list of encodings
+  that decoded_content() can decode.
+  
+  =item $r->content
+  
+  =item $r->content( $bytes )
+  
+  This is used to get/set the content and it is inherited from the
+  C<HTTP::Message> base class.  See L<HTTP::Message> for details and
+  other methods that can be used to access the content.
+  
+  Note that the content should be a string of bytes.  Strings in perl
+  can contain characters outside the range of a byte.  The C<Encode>
+  module can be used to turn such strings into a string of bytes.
+  
+  =item $r->as_string
+  
+  =item $r->as_string( $eol )
+  
+  Method returning a textual representation of the request.
+  
+  =back
+  
+  =head1 EXAMPLES
+  
+  Creating requests to be sent with L<LWP::UserAgent> or others can be easy. Here
+  are a few examples.
+  
+  =head2 Simple POST
+  
+  Here, we'll create a simple POST request that could be used to send JSON data
+  to an endpoint.
+  
+      #!/usr/bin/env perl
+  
+      use strict;
+      use warnings;
+  
+      use HTTP::Request ();
+      use JSON::MaybeXS qw(encode_json);
+  
+      my $url = 'https://www.example.com/api/user/123';
+      my $header = ['Content-Type' => 'application/json; charset=UTF-8'];
+      my $data = {foo => 'bar', baz => 'quux'};
+      my $encoded_data = encode_json($data);
+  
+      my $r = HTTP::Request->new('POST', $url, $header, $encoded_data);
+      # at this point, we could send it via LWP::UserAgent
+      # my $ua = LWP::UserAgent->new();
+      # my $res = $ua->request($r);
+  
+  =head2 Batch POST Request
+  
+  Some services, like Google, allow multiple requests to be sent in one batch.
+  L<https://developers.google.com/drive/v3/web/batch> for example. Using the
+  C<add_part> method from L<HTTP::Message> makes this simple.
+  
+      #!/usr/bin/env perl
+  
+      use strict;
+      use warnings;
+  
+      use HTTP::Request ();
+      use JSON::MaybeXS qw(encode_json);
+  
+      my $auth_token = 'auth_token';
+      my $batch_url = 'https://www.googleapis.com/batch';
+      my $url = 'https://www.googleapis.com/drive/v3/files/fileId/permissions?fields=id';
+      my $url_no_email = 'https://www.googleapis.com/drive/v3/files/fileId/permissions?fields=id&sendNotificationEmail=false';
+  
+      # generate a JSON post request for one of the batch entries
+      my $req1 = build_json_request($url, {
+          emailAddress => 'example@appsrocks.com',
+          role => "writer",
+          type => "user",
+      });
+  
+      # generate a JSON post request for one of the batch entries
+      my $req2 = build_json_request($url_no_email, {
+          domain => "appsrocks.com",
+          role => "reader",
+          type => "domain",
+      });
+  
+      # generate a multipart request to send all of the other requests
+      my $r = HTTP::Request->new('POST', $batch_url, [
+          'Accept-Encoding' => 'gzip',
+          # if we don't provide a boundary here, HTTP::Message will generate
+          # one for us. We could use UUID::uuid() here if we wanted.
+          'Content-Type' => 'multipart/mixed; boundary=END_OF_PART'
+      ]);
+  
+      # add the two POST requests to the main request
+      $r->add_part($req1, $req2);
+      # at this point, we could send it via LWP::UserAgent
+      # my $ua = LWP::UserAgent->new();
+      # my $res = $ua->request($r);
+      exit();
+  
+      sub build_json_request {
+          my ($url, $href) = @_;
+          my $header = ['Authorization' => "Bearer $auth_token", 'Content-Type' => 'application/json; charset=UTF-8'];
+          return HTTP::Request->new('POST', $url, $header, encode_json($href));
+      }
+  
+  =head1 SEE ALSO
+  
+  L<HTTP::Headers>, L<HTTP::Message>, L<HTTP::Request::Common>,
+  L<HTTP::Response>
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: HTTP style request message
+HTTP_REQUEST
+
+$fatpacked{"HTTP/Request/Common.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_REQUEST_COMMON';
+  package HTTP::Request::Common;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  our $DYNAMIC_FILE_UPLOAD ||= 0;  # make it defined (don't know why)
+  our $READ_BUFFER_SIZE      = 8192;
+  
+  use Exporter 5.57 'import';
+  
+  our @EXPORT =qw(GET HEAD PUT PATCH POST OPTIONS);
+  our @EXPORT_OK = qw($DYNAMIC_FILE_UPLOAD DELETE);
+  
+  require HTTP::Request;
+  use Carp();
+  use File::Spec;
+  
+  my $CRLF = "\015\012";   # "\r\n" is not portable
+  
+  sub GET  { _simple_req('GET',  @_); }
+  sub HEAD { _simple_req('HEAD', @_); }
+  sub DELETE { _simple_req('DELETE', @_); }
+  sub PATCH { request_type_with_data('PATCH', @_); }
+  sub POST { request_type_with_data('POST', @_); }
+  sub PUT { request_type_with_data('PUT', @_); }
+  sub OPTIONS { request_type_with_data('OPTIONS', @_); }
+  
+  sub request_type_with_data
+  {
+      my $type = shift;
+      my $url  = shift;
+      my $req = HTTP::Request->new($type => $url);
+      my $content;
+      $content = shift if @_ and ref $_[0];
+      my($k, $v);
+      while (($k,$v) = splice(@_, 0, 2)) {
+  	if (lc($k) eq 'content') {
+  	    $content = $v;
+  	}
+  	else {
+  	    $req->push_header($k, $v);
+  	}
+      }
+      my $ct = $req->header('Content-Type');
+      unless ($ct) {
+  	$ct = 'application/x-www-form-urlencoded';
+      }
+      elsif ($ct eq 'form-data') {
+  	$ct = 'multipart/form-data';
+      }
+  
+      if (ref $content) {
+  	if ($ct =~ m,^multipart/form-data\s*(;|$),i) {
+  	    require HTTP::Headers::Util;
+  	    my @v = HTTP::Headers::Util::split_header_words($ct);
+  	    Carp::carp("Multiple Content-Type headers") if @v > 1;
+  	    @v = @{$v[0]};
+  
+  	    my $boundary;
+  	    my $boundary_index;
+  	    for (my @tmp = @v; @tmp;) {
+  		my($k, $v) = splice(@tmp, 0, 2);
+  		if ($k eq "boundary") {
+  		    $boundary = $v;
+  		    $boundary_index = @v - @tmp - 1;
+  		    last;
+  		}
+  	    }
+  
+  	    ($content, $boundary) = form_data($content, $boundary, $req);
+  
+  	    if ($boundary_index) {
+  		$v[$boundary_index] = $boundary;
+  	    }
+  	    else {
+  		push(@v, boundary => $boundary);
+  	    }
+  
+  	    $ct = HTTP::Headers::Util::join_header_words(@v);
+  	}
+  	else {
+  	    # We use a temporary URI object to format
+  	    # the application/x-www-form-urlencoded content.
+  	    require URI;
+  	    my $url = URI->new('http:');
+  	    $url->query_form(ref($content) eq "HASH" ? %$content : @$content);
+  	    $content = $url->query;
+  
+  	    # HTML/4.01 says that line breaks are represented as "CR LF" pairs (i.e., `%0D%0A')
+  	    $content =~ s/(?<!%0D)%0A/%0D%0A/g if defined($content);
+  	}
+      }
+  
+      $req->header('Content-Type' => $ct);  # might be redundant
+      if (defined($content)) {
+  	$req->header('Content-Length' =>
+  		     length($content)) unless ref($content);
+  	$req->content($content);
+      }
+      else {
+          $req->header('Content-Length' => 0);
+      }
+      $req;
+  }
+  
+  
+  sub _simple_req
+  {
+      my($method, $url) = splice(@_, 0, 2);
+      my $req = HTTP::Request->new($method => $url);
+      my($k, $v);
+      my $content;
+      while (($k,$v) = splice(@_, 0, 2)) {
+  	if (lc($k) eq 'content') {
+  	    $req->add_content($v);
+              $content++;
+  	}
+  	else {
+  	    $req->push_header($k, $v);
+  	}
+      }
+      if ($content && !defined($req->header("Content-Length"))) {
+          $req->header("Content-Length", length(${$req->content_ref}));
+      }
+      $req;
+  }
+  
+  
+  sub form_data   # RFC1867
+  {
+      my($data, $boundary, $req) = @_;
+      my @data = ref($data) eq "HASH" ? %$data : @$data;  # copy
+      my $fhparts;
+      my @parts;
+      while (my ($k,$v) = splice(@data, 0, 2)) {
+  	if (!ref($v)) {
+  	    $k =~ s/([\\\"])/\\$1/g;  # escape quotes and backslashes
+              no warnings 'uninitialized';
+  	    push(@parts,
+  		 qq(Content-Disposition: form-data; name="$k"$CRLF$CRLF$v));
+  	}
+  	else {
+  	    my($file, $usename, @headers) = @$v;
+  	    unless (defined $usename) {
+  		$usename = $file;
+  		$usename = (File::Spec->splitpath($usename))[-1] if defined($usename);
+  	    }
+              $k =~ s/([\\\"])/\\$1/g;
+  	    my $disp = qq(form-data; name="$k");
+              if (defined($usename) and length($usename)) {
+                  $usename =~ s/([\\\"])/\\$1/g;
+                  $disp .= qq(; filename="$usename");
+              }
+  	    my $content = "";
+  	    my $h = HTTP::Headers->new(@headers);
+  	    if ($file) {
+  		open(my $fh, "<", $file) or Carp::croak("Can't open file $file: $!");
+  		binmode($fh);
+  		if ($DYNAMIC_FILE_UPLOAD) {
+  		    # will read file later, close it now in order to
+                      # not accumulate to many open file handles
+                      close($fh);
+  		    $content = \$file;
+  		}
+  		else {
+  		    local($/) = undef; # slurp files
+  		    $content = <$fh>;
+  		    close($fh);
+  		}
+  		unless ($h->header("Content-Type")) {
+  		    require LWP::MediaTypes;
+  		    LWP::MediaTypes::guess_media_type($file, $h);
+  		}
+  	    }
+  	    if ($h->header("Content-Disposition")) {
+  		# just to get it sorted first
+  		$disp = $h->header("Content-Disposition");
+  		$h->remove_header("Content-Disposition");
+  	    }
+  	    if ($h->header("Content")) {
+  		$content = $h->header("Content");
+  		$h->remove_header("Content");
+  	    }
+  	    my $head = join($CRLF, "Content-Disposition: $disp",
+  			           $h->as_string($CRLF),
+  			           "");
+  	    if (ref $content) {
+  		push(@parts, [$head, $$content]);
+  		$fhparts++;
+  	    }
+  	    else {
+  		push(@parts, $head . $content);
+  	    }
+  	}
+      }
+      return ("", "none") unless @parts;
+  
+      my $content;
+      if ($fhparts) {
+  	$boundary = boundary(10) # hopefully enough randomness
+  	    unless $boundary;
+  
+  	# add the boundaries to the @parts array
+  	for (1..@parts-1) {
+  	    splice(@parts, $_*2-1, 0, "$CRLF--$boundary$CRLF");
+  	}
+  	unshift(@parts, "--$boundary$CRLF");
+  	push(@parts, "$CRLF--$boundary--$CRLF");
+  
+  	# See if we can generate Content-Length header
+  	my $length = 0;
+  	for (@parts) {
+  	    if (ref $_) {
+  	 	my ($head, $f) = @$_;
+  		my $file_size;
+  		unless ( -f $f && ($file_size = -s _) ) {
+  		    # The file is either a dynamic file like /dev/audio
+  		    # or perhaps a file in the /proc file system where
+  		    # stat may return a 0 size even though reading it
+  		    # will produce data.  So we cannot make
+  		    # a Content-Length header.
+  		    undef $length;
+  		    last;
+  		}
+  	    	$length += $file_size + length $head;
+  	    }
+  	    else {
+  		$length += length;
+  	    }
+          }
+          $length && $req->header('Content-Length' => $length);
+  
+  	# set up a closure that will return content piecemeal
+  	$content = sub {
+  	    for (;;) {
+  		unless (@parts) {
+  		    defined $length && $length != 0 &&
+  		    	Carp::croak "length of data sent did not match calculated Content-Length header.  Probably because uploaded file changed in size during transfer.";
+  		    return;
+  		}
+  		my $p = shift @parts;
+  		unless (ref $p) {
+  		    $p .= shift @parts while @parts && !ref($parts[0]);
+  		    defined $length && ($length -= length $p);
+  		    return $p;
+  		}
+  		my($buf, $fh) = @$p;
+                  unless (ref($fh)) {
+                      my $file = $fh;
+                      undef($fh);
+                      open($fh, "<", $file) || Carp::croak("Can't open file $file: $!");
+                      binmode($fh);
+                  }
+  		my $buflength = length $buf;
+  		my $n = read($fh, $buf, $READ_BUFFER_SIZE, $buflength);
+  		if ($n) {
+  		    $buflength += $n;
+  		    unshift(@parts, ["", $fh]);
+  		}
+  		else {
+  		    close($fh);
+  		}
+  		if ($buflength) {
+  		    defined $length && ($length -= $buflength);
+  		    return $buf
+  	    	}
+  	    }
+  	};
+  
+      }
+      else {
+  	$boundary = boundary() unless $boundary;
+  
+  	my $bno = 0;
+        CHECK_BOUNDARY:
+  	{
+  	    for (@parts) {
+  		if (index($_, $boundary) >= 0) {
+  		    # must have a better boundary
+  		    $boundary = boundary(++$bno);
+  		    redo CHECK_BOUNDARY;
+  		}
+  	    }
+  	    last;
+  	}
+  	$content = "--$boundary$CRLF" .
+  	           join("$CRLF--$boundary$CRLF", @parts) .
+  		   "$CRLF--$boundary--$CRLF";
+      }
+  
+      wantarray ? ($content, $boundary) : $content;
+  }
+  
+  
+  sub boundary
+  {
+      my $size = shift || return "xYzZY";
+      require MIME::Base64;
+      my $b = MIME::Base64::encode(join("", map chr(rand(256)), 1..$size*3), "");
+      $b =~ s/[\W]/X/g;  # ensure alnum only
+      $b;
+  }
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Request::Common - Construct common HTTP::Request objects
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 SYNOPSIS
+  
+    use HTTP::Request::Common;
+    $ua = LWP::UserAgent->new;
+    $ua->request(GET 'http://www.sn.no/');
+    $ua->request(POST 'http://somewhere/foo', foo => bar, bar => foo);
+    $ua->request(PATCH 'http://somewhere/foo', foo => bar, bar => foo);
+    $ua->request(PUT 'http://somewhere/foo', foo => bar, bar => foo);
+    $ua->request(OPTIONS 'http://somewhere/foo', foo => bar, bar => foo);
+  
+  =head1 DESCRIPTION
+  
+  This module provides functions that return newly created C<HTTP::Request>
+  objects.  These functions are usually more convenient to use than the
+  standard C<HTTP::Request> constructor for the most common requests.
+  
+  Note that L<LWP::UserAgent> has several convenience methods, including
+  C<get>, C<head>, C<delete>, C<post> and C<put>.
+  
+  The following functions are provided:
+  
+  =over 4
+  
+  =item GET $url
+  
+  =item GET $url, Header => Value,...
+  
+  The C<GET> function returns an L<HTTP::Request> object initialized with
+  the "GET" method and the specified URL.  It is roughly equivalent to the
+  following call
+  
+    HTTP::Request->new(
+       GET => $url,
+       HTTP::Headers->new(Header => Value,...),
+    )
+  
+  but is less cluttered.  What is different is that a header named
+  C<Content> will initialize the content part of the request instead of
+  setting a header field.  Note that GET requests should normally not
+  have a content, so this hack makes more sense for the C<PUT>, C<PATCH>
+   and C<POST> functions described below.
+  
+  The C<get(...)> method of L<LWP::UserAgent> exists as a shortcut for
+  C<< $ua->request(GET ...) >>.
+  
+  =item HEAD $url
+  
+  =item HEAD $url, Header => Value,...
+  
+  Like GET() but the method in the request is "HEAD".
+  
+  The C<head(...)>  method of L<LWP::UserAgent> exists as a shortcut for
+  C<< $ua->request(HEAD ...) >>.
+  
+  =item DELETE $url
+  
+  =item DELETE $url, Header => Value,...
+  
+  Like C<GET> but the method in the request is C<DELETE>.  This function
+  is not exported by default.
+  
+  =item PATCH $url
+  
+  =item PATCH $url, Header => Value,...
+  
+  =item PATCH $url, $form_ref, Header => Value,...
+  
+  =item PATCH $url, Header => Value,..., Content => $form_ref
+  
+  =item PATCH $url, Header => Value,..., Content => $content
+  
+  The same as C<POST> below, but the method in the request is C<PATCH>.
+  
+  =item PUT $url
+  
+  =item PUT $url, Header => Value,...
+  
+  =item PUT $url, $form_ref, Header => Value,...
+  
+  =item PUT $url, Header => Value,..., Content => $form_ref
+  
+  =item PUT $url, Header => Value,..., Content => $content
+  
+  The same as C<POST> below, but the method in the request is C<PUT>
+  
+  =item OPTIONS $url
+  
+  =item OPTIONS $url, Header => Value,...
+  
+  =item OPTIONS $url, $form_ref, Header => Value,...
+  
+  =item OPTIONS $url, Header => Value,..., Content => $form_ref
+  
+  =item OPTIONS $url, Header => Value,..., Content => $content
+  
+  The same as C<POST> below, but the method in the request is C<OPTIONS>
+  
+  This was added in version 6.21, so you should require that in your code:
+  
+   use HTTP::Request::Common 6.21;
+  
+  =item POST $url
+  
+  =item POST $url, Header => Value,...
+  
+  =item POST $url, $form_ref, Header => Value,...
+  
+  =item POST $url, Header => Value,..., Content => $form_ref
+  
+  =item POST $url, Header => Value,..., Content => $content
+  
+  C<POST>, C<PATCH> and C<PUT> all work with the same parameters.
+  
+    %data = ( title => 'something', body => something else' );
+    $ua = LWP::UserAgent->new();
+    $request = HTTP::Request::Common::POST( $url, [ %data ] );
+    $response = $ua->request($request);
+  
+  They take a second optional array or hash reference
+  parameter C<$form_ref>.  The content can also be specified
+  directly using the C<Content> pseudo-header, and you may also provide
+  the C<$form_ref> this way.
+  
+  The C<Content> pseudo-header steals a bit of the header field namespace as
+  there is no way to directly specify a header that is actually called
+  "Content".  If you really need this you must update the request
+  returned in a separate statement.
+  
+  The C<$form_ref> argument can be used to pass key/value pairs for the
+  form content.  By default we will initialize a request using the
+  C<application/x-www-form-urlencoded> content type.  This means that
+  you can emulate an HTML E<lt>form> POSTing like this:
+  
+    POST 'http://www.perl.org/survey.cgi',
+         [ name   => 'Gisle Aas',
+           email  => 'gisle@aas.no',
+           gender => 'M',
+           born   => '1964',
+           perc   => '3%',
+         ];
+  
+  This will create an L<HTTP::Request> object that looks like this:
+  
+    POST http://www.perl.org/survey.cgi
+    Content-Length: 66
+    Content-Type: application/x-www-form-urlencoded
+  
+    name=Gisle%20Aas&email=gisle%40aas.no&gender=M&born=1964&perc=3%25
+  
+  Multivalued form fields can be specified by either repeating the field
+  name or by passing the value as an array reference.
+  
+  The POST method also supports the C<multipart/form-data> content used
+  for I<Form-based File Upload> as specified in RFC 1867.  You trigger
+  this content format by specifying a content type of C<'form-data'> as
+  one of the request headers.  If one of the values in the C<$form_ref> is
+  an array reference, then it is treated as a file part specification
+  with the following interpretation:
+  
+    [ $file, $filename, Header => Value... ]
+    [ undef, $filename, Header => Value,..., Content => $content ]
+  
+  The first value in the array ($file) is the name of a file to open.
+  This file will be read and its content placed in the request.  The
+  routine will croak if the file can't be opened.  Use an C<undef> as
+  $file value if you want to specify the content directly with a
+  C<Content> header.  The $filename is the filename to report in the
+  request.  If this value is undefined, then the basename of the $file
+  will be used.  You can specify an empty string as $filename if you
+  want to suppress sending the filename when you provide a $file value.
+  
+  If a $file is provided by no C<Content-Type> header, then C<Content-Type>
+  and C<Content-Encoding> will be filled in automatically with the values
+  returned by C<LWP::MediaTypes::guess_media_type()>
+  
+  Sending my F<~/.profile> to the survey used as example above can be
+  achieved by this:
+  
+    POST 'http://www.perl.org/survey.cgi',
+         Content_Type => 'form-data',
+         Content      => [ name  => 'Gisle Aas',
+                           email => 'gisle@aas.no',
+                           gender => 'M',
+                           born   => '1964',
+                           init   => ["$ENV{HOME}/.profile"],
+                         ]
+  
+  This will create an L<HTTP::Request> object that almost looks this (the
+  boundary and the content of your F<~/.profile> is likely to be
+  different):
+  
+    POST http://www.perl.org/survey.cgi
+    Content-Length: 388
+    Content-Type: multipart/form-data; boundary="6G+f"
+  
+    --6G+f
+    Content-Disposition: form-data; name="name"
+  
+    Gisle Aas
+    --6G+f
+    Content-Disposition: form-data; name="email"
+  
+    gisle@aas.no
+    --6G+f
+    Content-Disposition: form-data; name="gender"
+  
+    M
+    --6G+f
+    Content-Disposition: form-data; name="born"
+  
+    1964
+    --6G+f
+    Content-Disposition: form-data; name="init"; filename=".profile"
+    Content-Type: text/plain
+  
+    PATH=/local/perl/bin:$PATH
+    export PATH
+  
+    --6G+f--
+  
+  If you set the C<$DYNAMIC_FILE_UPLOAD> variable (exportable) to some TRUE
+  value, then you get back a request object with a subroutine closure as
+  the content attribute.  This subroutine will read the content of any
+  files on demand and return it in suitable chunks.  This allow you to
+  upload arbitrary big files without using lots of memory.  You can even
+  upload infinite files like F</dev/audio> if you wish; however, if
+  the file is not a plain file, there will be no C<Content-Length> header
+  defined for the request.  Not all servers (or server
+  applications) like this.  Also, if the file(s) change in size between
+  the time the C<Content-Length> is calculated and the time that the last
+  chunk is delivered, the subroutine will C<Croak>.
+  
+  The C<post(...)>  method of L<LWP::UserAgent> exists as a shortcut for
+  C<< $ua->request(POST ...) >>.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<HTTP::Request>, L<LWP::UserAgent>
+  
+  Also, there are some examples in L<HTTP::Request/"EXAMPLES"> that you might
+  find useful. For example, batch requests are explained there.
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: Construct common HTTP::Request objects
+HTTP_REQUEST_COMMON
+
+$fatpacked{"HTTP/Response.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_RESPONSE';
+  package HTTP::Response;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.44';
+  
+  use parent 'HTTP::Message';
+  
+  use HTTP::Status ();
+  
+  
+  sub new
+  {
+      my($class, $rc, $msg, $header, $content) = @_;
+      my $self = $class->SUPER::new($header, $content);
+      $self->code($rc);
+      $self->message($msg);
+      $self;
+  }
+  
+  
+  sub parse
+  {
+      my($class, $str) = @_;
+      Carp::carp('Undefined argument to parse()') if $^W && ! defined $str;
+      my $status_line;
+      if (defined $str && $str =~ s/^(.*)\n//) {
+  	$status_line = $1;
+      }
+      else {
+  	$status_line = $str;
+  	$str = "";
+      }
+  
+      $status_line =~ s/\r\z// if defined $status_line;
+  
+      my $self = $class->SUPER::parse($str);
+      if (defined $status_line) {
+          my($protocol, $code, $message);
+          if ($status_line =~ /^\d{3} /) {
+             # Looks like a response created by HTTP::Response->new
+             ($code, $message) = split(' ', $status_line, 2);
+          } else {
+             ($protocol, $code, $message) = split(' ', $status_line, 3);
+          }
+          $self->protocol($protocol) if $protocol;
+          $self->code($code) if defined($code);
+          $self->message($message) if defined($message);
+      }
+      $self;
+  }
+  
+  
+  sub clone
+  {
+      my $self = shift;
+      my $clone = bless $self->SUPER::clone, ref($self);
+      $clone->code($self->code);
+      $clone->message($self->message);
+      $clone->request($self->request->clone) if $self->request;
+      # we don't clone previous
+      $clone;
+  }
+  
+  
+  sub code      { shift->_elem('_rc',      @_); }
+  sub message   { shift->_elem('_msg',     @_); }
+  sub previous  { shift->_elem('_previous',@_); }
+  sub request   { shift->_elem('_request', @_); }
+  
+  
+  sub status_line
+  {
+      my $self = shift;
+      my $code = $self->{'_rc'}  || "000";
+      my $mess = $self->{'_msg'} || HTTP::Status::status_message($code) || "Unknown code";
+      return "$code $mess";
+  }
+  
+  
+  sub base
+  {
+      my $self = shift;
+      my $base = (
+  	$self->header('Content-Base'),        # used to be HTTP/1.1
+  	$self->header('Base'),                # HTTP/1.0
+      )[0];
+      if ($base && $base =~ /^$URI::scheme_re:/o) {
+  	# already absolute
+  	return $HTTP::URI_CLASS->new($base);
+      }
+  
+      my $req = $self->request;
+      if ($req) {
+          # if $base is undef here, the return value is effectively
+          # just a copy of $self->request->uri.
+          return $HTTP::URI_CLASS->new_abs($base, $req->uri);
+      }
+  
+      # can't find an absolute base
+      return undef;
+  }
+  
+  
+  sub redirects {
+      my $self = shift;
+      my @r;
+      my $r = $self;
+      while (my $p = $r->previous) {
+          push(@r, $p);
+          $r = $p;
+      }
+      return @r unless wantarray;
+      return reverse @r;
+  }
+  
+  
+  sub filename
+  {
+      my $self = shift;
+      my $file;
+  
+      my $cd = $self->header('Content-Disposition');
+      if ($cd) {
+  	require HTTP::Headers::Util;
+  	if (my @cd = HTTP::Headers::Util::split_header_words($cd)) {
+  	    my ($disposition, undef, %cd_param) = @{$cd[-1]};
+  	    $file = $cd_param{filename};
+  
+  	    # RFC 2047 encoded?
+  	    if ($file && $file =~ /^=\?(.+?)\?(.+?)\?(.+)\?=$/) {
+  		my $charset = $1;
+  		my $encoding = uc($2);
+  		my $encfile = $3;
+  
+  		if ($encoding eq 'Q' || $encoding eq 'B') {
+  		    local($SIG{__DIE__});
+  		    eval {
+  			if ($encoding eq 'Q') {
+  			    $encfile =~ s/_/ /g;
+  			    require MIME::QuotedPrint;
+  			    $encfile = MIME::QuotedPrint::decode($encfile);
+  			}
+  			else { # $encoding eq 'B'
+  			    require MIME::Base64;
+  			    $encfile = MIME::Base64::decode($encfile);
+  			}
+  
+  			require Encode;
+  			require Encode::Locale;
+  			Encode::from_to($encfile, $charset, "locale_fs");
+  		    };
+  
+  		    $file = $encfile unless $@;
+  		}
+  	    }
+  	}
+      }
+  
+      unless (defined($file) && length($file)) {
+  	my $uri;
+  	if (my $cl = $self->header('Content-Location')) {
+  	    $uri = URI->new($cl);
+  	}
+  	elsif (my $request = $self->request) {
+  	    $uri = $request->uri;
+  	}
+  
+  	if ($uri) {
+  	    $file = ($uri->path_segments)[-1];
+  	}
+      }
+  
+      if ($file) {
+  	$file =~ s,.*[\\/],,;  # basename
+      }
+  
+      if ($file && !length($file)) {
+  	$file = undef;
+      }
+  
+      $file;
+  }
+  
+  
+  sub as_string
+  {
+      my $self = shift;
+      my($eol) = @_;
+      $eol = "\n" unless defined $eol;
+  
+      my $status_line = $self->status_line;
+      my $proto = $self->protocol;
+      $status_line = "$proto $status_line" if $proto;
+  
+      return join($eol, $status_line, $self->SUPER::as_string(@_));
+  }
+  
+  
+  sub dump
+  {
+      my $self = shift;
+  
+      my $status_line = $self->status_line;
+      my $proto = $self->protocol;
+      $status_line = "$proto $status_line" if $proto;
+  
+      return $self->SUPER::dump(
+  	preheader => $status_line,
+          @_,
+      );
+  }
+  
+  
+  sub is_info     { HTTP::Status::is_info     (shift->{'_rc'}); }
+  sub is_success  { HTTP::Status::is_success  (shift->{'_rc'}); }
+  sub is_redirect { HTTP::Status::is_redirect (shift->{'_rc'}); }
+  sub is_error    { HTTP::Status::is_error    (shift->{'_rc'}); }
+  sub is_client_error { HTTP::Status::is_client_error (shift->{'_rc'}); }
+  sub is_server_error { HTTP::Status::is_server_error (shift->{'_rc'}); }
+  
+  
+  sub error_as_HTML
+  {
+      my $self = shift;
+      my $title = 'An Error Occurred';
+      my $body  = $self->status_line;
+      $body =~ s/&/&amp;/g;
+      $body =~ s/</&lt;/g;
+      return <<EOM;
+  <html>
+  <head><title>$title</title></head>
+  <body>
+  <h1>$title</h1>
+  <p>$body</p>
+  </body>
+  </html>
+  EOM
+  }
+  
+  
+  sub current_age
+  {
+      my $self = shift;
+      my $time = shift;
+  
+      # Implementation of RFC 2616 section 13.2.3
+      # (age calculations)
+      my $response_time = $self->client_date;
+      my $date = $self->date;
+  
+      my $age = 0;
+      if ($response_time && $date) {
+  	$age = $response_time - $date;  # apparent_age
+  	$age = 0 if $age < 0;
+      }
+  
+      my $age_v = $self->header('Age');
+      if ($age_v && $age_v > $age) {
+  	$age = $age_v;   # corrected_received_age
+      }
+  
+      if ($response_time) {
+  	my $request = $self->request;
+  	if ($request) {
+  	    my $request_time = $request->date;
+  	    if ($request_time && $request_time < $response_time) {
+  		# Add response_delay to age to get 'corrected_initial_age'
+  		$age += $response_time - $request_time;
+  	    }
+  	}
+  	$age += ($time || time) - $response_time;
+      }
+      return $age;
+  }
+  
+  
+  sub freshness_lifetime
+  {
+      my($self, %opt) = @_;
+  
+      # First look for the Cache-Control: max-age=n header
+      for my $cc ($self->header('Cache-Control')) {
+  	for my $cc_dir (split(/\s*,\s*/, $cc)) {
+  	    return $1 if $cc_dir =~ /^max-age\s*=\s*(\d+)/i;
+  	}
+      }
+  
+      # Next possibility is to look at the "Expires" header
+      my $date = $self->date || $self->client_date || $opt{time} || time;
+      if (my $expires = $self->expires) {
+  	return $expires - $date;
+      }
+  
+      # Must apply heuristic expiration
+      return undef if exists $opt{heuristic_expiry} && !$opt{heuristic_expiry};
+  
+      # Default heuristic expiration parameters
+      $opt{h_min} ||= 60;
+      $opt{h_max} ||= 24 * 3600;
+      $opt{h_lastmod_fraction} ||= 0.10; # 10% since last-mod suggested by RFC2616
+      $opt{h_default} ||= 3600;
+  
+      # Should give a warning if more than 24 hours according to
+      # RFC 2616 section 13.2.4.  Here we just make this the default
+      # maximum value.
+  
+      if (my $last_modified = $self->last_modified) {
+  	my $h_exp = ($date - $last_modified) * $opt{h_lastmod_fraction};
+  	return $opt{h_min} if $h_exp < $opt{h_min};
+  	return $opt{h_max} if $h_exp > $opt{h_max};
+  	return $h_exp;
+      }
+  
+      # default when all else fails
+      return $opt{h_min} if $opt{h_min} > $opt{h_default};
+      return $opt{h_default};
+  }
+  
+  
+  sub is_fresh
+  {
+      my($self, %opt) = @_;
+      $opt{time} ||= time;
+      my $f = $self->freshness_lifetime(%opt);
+      return undef unless defined($f);
+      return $f > $self->current_age($opt{time});
+  }
+  
+  
+  sub fresh_until
+  {
+      my($self, %opt) = @_;
+      $opt{time} ||= time;
+      my $f = $self->freshness_lifetime(%opt);
+      return undef unless defined($f);
+      return $f - $self->current_age($opt{time}) + $opt{time};
+  }
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Response - HTTP style response message
+  
+  =head1 VERSION
+  
+  version 6.44
+  
+  =head1 SYNOPSIS
+  
+  Response objects are returned by the request() method of the C<LWP::UserAgent>:
+  
+      # ...
+      $response = $ua->request($request);
+      if ($response->is_success) {
+          print $response->decoded_content;
+      }
+      else {
+          print STDERR $response->status_line, "\n";
+      }
+  
+  =head1 DESCRIPTION
+  
+  The C<HTTP::Response> class encapsulates HTTP style responses.  A
+  response consists of a response line, some headers, and a content
+  body. Note that the LWP library uses HTTP style responses even for
+  non-HTTP protocol schemes.  Instances of this class are usually
+  created and returned by the request() method of an C<LWP::UserAgent>
+  object.
+  
+  C<HTTP::Response> is a subclass of C<HTTP::Message> and therefore
+  inherits its methods.  The following additional methods are available:
+  
+  =over 4
+  
+  =item $r = HTTP::Response->new( $code )
+  
+  =item $r = HTTP::Response->new( $code, $msg )
+  
+  =item $r = HTTP::Response->new( $code, $msg, $header )
+  
+  =item $r = HTTP::Response->new( $code, $msg, $header, $content )
+  
+  Constructs a new C<HTTP::Response> object describing a response with
+  response code $code and optional message $msg.  The optional $header
+  argument should be a reference to an C<HTTP::Headers> object or a
+  plain array reference of key/value pairs.  The optional $content
+  argument should be a string of bytes.  The meanings of these arguments are
+  described below.
+  
+  =item $r = HTTP::Response->parse( $str )
+  
+  This constructs a new response object by parsing the given string.
+  
+  =item $r->code
+  
+  =item $r->code( $code )
+  
+  This is used to get/set the code attribute.  The code is a 3 digit
+  number that encode the overall outcome of an HTTP response.  The
+  C<HTTP::Status> module provide constants that provide mnemonic names
+  for the code attribute.
+  
+  =item $r->message
+  
+  =item $r->message( $message )
+  
+  This is used to get/set the message attribute.  The message is a short
+  human readable single line string that explains the response code.
+  
+  =item $r->header( $field )
+  
+  =item $r->header( $field => $value )
+  
+  This is used to get/set header values and it is inherited from
+  C<HTTP::Headers> via C<HTTP::Message>.  See L<HTTP::Headers> for
+  details and other similar methods that can be used to access the
+  headers.
+  
+  =item $r->content
+  
+  =item $r->content( $bytes )
+  
+  This is used to get/set the raw content and it is inherited from the
+  C<HTTP::Message> base class.  See L<HTTP::Message> for details and
+  other methods that can be used to access the content.
+  
+  =item $r->decoded_content( %options )
+  
+  This will return the content after any C<Content-Encoding> and
+  charsets have been decoded.  See L<HTTP::Message> for details.
+  
+  =item $r->request
+  
+  =item $r->request( $request )
+  
+  This is used to get/set the request attribute.  The request attribute
+  is a reference to the request that caused this response.  It does
+  not have to be the same request passed to the $ua->request() method,
+  because there might have been redirects and authorization retries in
+  between.
+  
+  =item $r->previous
+  
+  =item $r->previous( $response )
+  
+  This is used to get/set the previous attribute.  The previous
+  attribute is used to link together chains of responses.  You get
+  chains of responses if the first response is redirect or unauthorized.
+  The value is C<undef> if this is the first response in a chain.
+  
+  Note that the method $r->redirects is provided as a more convenient
+  way to access the response chain.
+  
+  =item $r->status_line
+  
+  Returns the string "E<lt>code> E<lt>message>".  If the message attribute
+  is not set then the official name of E<lt>code> (see L<HTTP::Status>)
+  is substituted.
+  
+  =item $r->base
+  
+  Returns the base URI for this response.  The return value will be a
+  reference to a URI object.
+  
+  The base URI is obtained from one the following sources (in priority
+  order):
+  
+  =over 4
+  
+  =item 1.
+  
+  Embedded in the document content, for instance <BASE HREF="...">
+  in HTML documents.
+  
+  =item 2.
+  
+  A "Content-Base:" header in the response.
+  
+  For backwards compatibility with older HTTP implementations we will
+  also look for the "Base:" header.
+  
+  =item 3.
+  
+  The URI used to request this response. This might not be the original
+  URI that was passed to $ua->request() method, because we might have
+  received some redirect responses first.
+  
+  =back
+  
+  If none of these sources provide an absolute URI, undef is returned.
+  
+  B<Note>: previous versions of HTTP::Response would also consider
+  a "Content-Location:" header,
+  as L<RFC 2616|https://www.rfc-editor.org/rfc/rfc2616> said it should be.
+  But this was never widely implemented by browsers,
+  and now L<RFC 7231|https://www.rfc-editor.org/rfc/rfc7231>
+  says it should no longer be considered.
+  
+  When the LWP protocol modules produce the HTTP::Response object, then any base
+  URI embedded in the document (step 1) will already have initialized the
+  "Content-Base:" header. (See L<LWP::UserAgent/parse_head>).  This means that
+  this method only performs the last 2 steps (the content is not always available
+  either).
+  
+  =item $r->filename
+  
+  Returns a filename for this response.  Note that doing sanity checks
+  on the returned filename (eg. removing characters that cannot be used
+  on the target filesystem where the filename would be used, and
+  laundering it for security purposes) are the caller's responsibility;
+  the only related thing done by this method is that it makes a simple
+  attempt to return a plain filename with no preceding path segments.
+  
+  The filename is obtained from one the following sources (in priority
+  order):
+  
+  =over 4
+  
+  =item 1.
+  
+  A "Content-Disposition:" header in the response.  Proper decoding of
+  RFC 2047 encoded filenames requires the C<MIME::QuotedPrint> (for "Q"
+  encoding), C<MIME::Base64> (for "B" encoding), and C<Encode> modules.
+  
+  =item 2.
+  
+  A "Content-Location:" header in the response.
+  
+  =item 3.
+  
+  The URI used to request this response. This might not be the original
+  URI that was passed to $ua->request() method, because we might have
+  received some redirect responses first.
+  
+  =back
+  
+  If a filename cannot be derived from any of these sources, undef is
+  returned.
+  
+  =item $r->as_string
+  
+  =item $r->as_string( $eol )
+  
+  Returns a textual representation of the response.
+  
+  =item $r->is_info
+  
+  =item $r->is_success
+  
+  =item $r->is_redirect
+  
+  =item $r->is_error
+  
+  =item $r->is_client_error
+  
+  =item $r->is_server_error
+  
+  These methods indicate if the response was informational, successful, a
+  redirection, or an error.  See L<HTTP::Status> for the meaning of these.
+  
+  =item $r->error_as_HTML
+  
+  Returns a string containing a complete HTML document indicating what
+  error occurred.  This method should only be called when $r->is_error
+  is TRUE.
+  
+  =item $r->redirects
+  
+  Returns the list of redirect responses that lead up to this response
+  by following the $r->previous chain.  The list order is oldest first.
+  
+  In scalar context return the number of redirect responses leading up
+  to this one.
+  
+  =item $r->current_age
+  
+  Calculates the "current age" of the response as specified by RFC 2616
+  section 13.2.3.  The age of a response is the time since it was sent
+  by the origin server.  The returned value is a number representing the
+  age in seconds.
+  
+  =item $r->freshness_lifetime( %opt )
+  
+  Calculates the "freshness lifetime" of the response as specified by
+  RFC 2616 section 13.2.4.  The "freshness lifetime" is the length of
+  time between the generation of a response and its expiration time.
+  The returned value is the number of seconds until expiry.
+  
+  If the response does not contain an "Expires" or a "Cache-Control"
+  header, then this function will apply some simple heuristic based on
+  the "Last-Modified" header to determine a suitable lifetime.  The
+  following options might be passed to control the heuristics:
+  
+  =over
+  
+  =item heuristic_expiry => $bool
+  
+  If passed as a FALSE value, don't apply heuristics and just return
+  C<undef> when "Expires" or "Cache-Control" is lacking.
+  
+  =item h_lastmod_fraction => $num
+  
+  This number represent the fraction of the difference since the
+  "Last-Modified" timestamp to make the expiry time.  The default is
+  C<0.10>, the suggested typical setting of 10% in RFC 2616.
+  
+  =item h_min => $sec
+  
+  This is the lower limit of the heuristic expiry age to use.  The
+  default is C<60> (1 minute).
+  
+  =item h_max => $sec
+  
+  This is the upper limit of the heuristic expiry age to use.  The
+  default is C<86400> (24 hours).
+  
+  =item h_default => $sec
+  
+  This is the expiry age to use when nothing else applies.  The default
+  is C<3600> (1 hour) or "h_min" if greater.
+  
+  =back
+  
+  =item $r->is_fresh( %opt )
+  
+  Returns TRUE if the response is fresh, based on the values of
+  freshness_lifetime() and current_age().  If the response is no longer
+  fresh, then it has to be re-fetched or re-validated by the origin
+  server.
+  
+  Options might be passed to control expiry heuristics, see the
+  description of freshness_lifetime().
+  
+  =item $r->fresh_until( %opt )
+  
+  Returns the time (seconds since epoch) when this entity is no longer fresh.
+  
+  Options might be passed to control expiry heuristics, see the
+  description of freshness_lifetime().
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<HTTP::Headers>, L<HTTP::Message>, L<HTTP::Status>, L<HTTP::Request>
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: HTTP style response message
+  
+HTTP_RESPONSE
 
 $fatpacked{"HTTP/Server/PSGI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_SERVER_PSGI';
   package HTTP::Server::PSGI;
@@ -9366,6 +13155,1294 @@ $fatpacked{"Hash/MultiValue.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<
   
   =cut
 HASH_MULTIVALUE
+
+$fatpacked{"IO/Socket/IP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'IO_SOCKET_IP';
+  #  You may distribute under the terms of either the GNU General Public License
+  #  or the Artistic License (the same terms as Perl itself)
+  #
+  #  (C) Paul Evans, 2010-2020 -- leonerd@leonerd.org.uk
+  
+  package IO::Socket::IP;
+  
+  use v5;
+  use strict;
+  use warnings;
+  
+  # $VERSION needs to be set before  use base 'IO::Socket'
+  #  - https://rt.cpan.org/Ticket/Display.html?id=92107
+  BEGIN {
+     our $VERSION = '0.41';
+  }
+  
+  use base qw( IO::Socket );
+  
+  use Carp;
+  
+  use Socket 1.97 qw(
+     getaddrinfo getnameinfo
+     sockaddr_family
+     AF_INET
+     AI_PASSIVE
+     IPPROTO_TCP IPPROTO_UDP
+     IPPROTO_IPV6 IPV6_V6ONLY
+     NI_DGRAM NI_NUMERICHOST NI_NUMERICSERV NIx_NOHOST NIx_NOSERV
+     SO_REUSEADDR SO_REUSEPORT SO_BROADCAST SO_ERROR
+     SOCK_DGRAM SOCK_STREAM
+     SOL_SOCKET
+  );
+  my $AF_INET6 = eval { Socket::AF_INET6() }; # may not be defined
+  my $AI_ADDRCONFIG = eval { Socket::AI_ADDRCONFIG() } || 0;
+  use POSIX qw( dup2 );
+  use Errno qw( EINVAL EINPROGRESS EISCONN ENOTCONN ETIMEDOUT EWOULDBLOCK EOPNOTSUPP );
+  
+  use constant HAVE_MSWIN32 => ( $^O eq "MSWin32" );
+  
+  # At least one OS (Android) is known not to have getprotobyname()
+  use constant HAVE_GETPROTOBYNAME => defined eval { getprotobyname( "tcp" ) };
+  
+  my $IPv6_re = do {
+     # translation of RFC 3986 3.2.2 ABNF to re
+     my $IPv4address = do {
+        my $dec_octet = q<(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])>;
+        qq<$dec_octet(?: \\. $dec_octet){3}>;
+     };
+     my $IPv6address = do {
+        my $h16  = qq<[0-9A-Fa-f]{1,4}>;
+        my $ls32 = qq<(?: $h16 : $h16 | $IPv4address)>;
+        qq<(?:
+                                              (?: $h16 : ){6} $ls32
+           |                               :: (?: $h16 : ){5} $ls32
+           | (?:                   $h16 )? :: (?: $h16 : ){4} $ls32
+           | (?: (?: $h16 : ){0,1} $h16 )? :: (?: $h16 : ){3} $ls32
+           | (?: (?: $h16 : ){0,2} $h16 )? :: (?: $h16 : ){2} $ls32
+           | (?: (?: $h16 : ){0,3} $h16 )? ::     $h16 :      $ls32
+           | (?: (?: $h16 : ){0,4} $h16 )? ::                 $ls32
+           | (?: (?: $h16 : ){0,5} $h16 )? ::                 $h16
+           | (?: (?: $h16 : ){0,6} $h16 )? ::
+        )>
+     };
+     qr<$IPv6address>xo;
+  };
+  
+  =head1 NAME
+  
+  C<IO::Socket::IP> - Family-neutral IP socket supporting both IPv4 and IPv6
+  
+  =head1 SYNOPSIS
+  
+   use IO::Socket::IP;
+  
+   my $sock = IO::Socket::IP->new(
+      PeerHost => "www.google.com",
+      PeerPort => "http",
+      Type     => SOCK_STREAM,
+   ) or die "Cannot construct socket - $@";
+  
+   my $familyname = ( $sock->sockdomain == PF_INET6 ) ? "IPv6" :
+                    ( $sock->sockdomain == PF_INET  ) ? "IPv4" :
+                                                        "unknown";
+  
+   printf "Connected to google via %s\n", $familyname;
+  
+  =head1 DESCRIPTION
+  
+  This module provides a protocol-independent way to use IPv4 and IPv6 sockets,
+  intended as a replacement for L<IO::Socket::INET>. Most constructor arguments
+  and methods are provided in a backward-compatible way. For a list of known
+  differences, see the C<IO::Socket::INET> INCOMPATIBILITES section below.
+  
+  It uses the C<getaddrinfo(3)> function to convert hostnames and service names
+  or port numbers into sets of possible addresses to connect to or listen on.
+  This allows it to work for IPv6 where the system supports it, while still
+  falling back to IPv4-only on systems which don't.
+  
+  =head1 REPLACING C<IO::Socket> DEFAULT BEHAVIOUR
+  
+  By placing C<-register> in the import list to C<IO::Socket::IP>, it will
+  register itself with L<IO::Socket> as the class that handles C<PF_INET>. It
+  will also ask to handle C<PF_INET6> as well, provided that constant is
+  available.
+  
+  Changing C<IO::Socket>'s default behaviour means that calling the
+  C<IO::Socket> constructor with either C<PF_INET> or C<PF_INET6> as the
+  C<Domain> parameter will yield an C<IO::Socket::IP> object.
+  
+   use IO::Socket::IP -register;
+  
+   my $sock = IO::Socket->new(
+      Domain    => PF_INET6,
+      LocalHost => "::1",
+      Listen    => 1,
+   ) or die "Cannot create socket - $@\n";
+  
+   print "Created a socket of type " . ref($sock) . "\n";
+  
+  Note that C<-register> is a global setting that applies to the entire program;
+  it cannot be applied only for certain callers, removed, or limited by lexical
+  scope.
+  
+  =cut
+  
+  sub import
+  {
+     my $pkg = shift;
+     my @symbols;
+  
+     foreach ( @_ ) {
+        if( $_ eq "-register" ) {
+           IO::Socket::IP::_ForINET->register_domain( AF_INET );
+           IO::Socket::IP::_ForINET6->register_domain( $AF_INET6 ) if defined $AF_INET6;
+        }
+        else {
+           push @symbols, $_;
+        }
+     }
+  
+     @_ = ( $pkg, @symbols );
+     goto &IO::Socket::import;
+  }
+  
+  # Convenient capability test function
+  {
+     my $can_disable_v6only;
+     sub CAN_DISABLE_V6ONLY
+     {
+        return $can_disable_v6only if defined $can_disable_v6only;
+  
+        socket my $testsock, Socket::PF_INET6(), SOCK_STREAM, 0 or
+           die "Cannot socket(PF_INET6) - $!";
+  
+        if( setsockopt $testsock, IPPROTO_IPV6, IPV6_V6ONLY, 0 ) {
+           return $can_disable_v6only = 1;
+        }
+        elsif( $! == EINVAL || $! == EOPNOTSUPP ) {
+           return $can_disable_v6only = 0;
+        }
+        else {
+           die "Cannot setsockopt() - $!";
+        }
+     }
+  }
+  
+  =head1 CONSTRUCTORS
+  
+  =cut
+  
+  =head2 new
+  
+     $sock = IO::Socket::IP->new( %args )
+  
+  Creates a new C<IO::Socket::IP> object, containing a newly created socket
+  handle according to the named arguments passed. The recognised arguments are:
+  
+  =over 8
+  
+  =item PeerHost => STRING
+  
+  =item PeerService => STRING
+  
+  Hostname and service name for the peer to C<connect()> to. The service name
+  may be given as a port number, as a decimal string.
+  
+  =item PeerAddr => STRING
+  
+  =item PeerPort => STRING
+  
+  For symmetry with the accessor methods and compatibility with
+  C<IO::Socket::INET>, these are accepted as synonyms for C<PeerHost> and
+  C<PeerService> respectively.
+  
+  =item PeerAddrInfo => ARRAY
+  
+  Alternate form of specifying the peer to C<connect()> to. This should be an
+  array of the form returned by C<Socket::getaddrinfo>.
+  
+  This parameter takes precedence over the C<Peer*>, C<Family>, C<Type> and
+  C<Proto> arguments.
+  
+  =item LocalHost => STRING
+  
+  =item LocalService => STRING
+  
+  Hostname and service name for the local address to C<bind()> to.
+  
+  =item LocalAddr => STRING
+  
+  =item LocalPort => STRING
+  
+  For symmetry with the accessor methods and compatibility with
+  C<IO::Socket::INET>, these are accepted as synonyms for C<LocalHost> and
+  C<LocalService> respectively.
+  
+  =item LocalAddrInfo => ARRAY
+  
+  Alternate form of specifying the local address to C<bind()> to. This should be
+  an array of the form returned by C<Socket::getaddrinfo>.
+  
+  This parameter takes precedence over the C<Local*>, C<Family>, C<Type> and
+  C<Proto> arguments.
+  
+  =item Family => INT
+  
+  The address family to pass to C<getaddrinfo> (e.g. C<AF_INET>, C<AF_INET6>).
+  Normally this will be left undefined, and C<getaddrinfo> will search using any
+  address family supported by the system.
+  
+  =item Type => INT
+  
+  The socket type to pass to C<getaddrinfo> (e.g. C<SOCK_STREAM>,
+  C<SOCK_DGRAM>). Normally defined by the caller; if left undefined
+  C<getaddrinfo> may attempt to infer the type from the service name.
+  
+  =item Proto => STRING or INT
+  
+  The IP protocol to use for the socket (e.g. C<'tcp'>, C<IPPROTO_TCP>,
+  C<'udp'>,C<IPPROTO_UDP>). Normally this will be left undefined, and either
+  C<getaddrinfo> or the kernel will choose an appropriate value. May be given
+  either in string name or numeric form.
+  
+  =item GetAddrInfoFlags => INT
+  
+  More flags to pass to the C<getaddrinfo()> function. If not supplied, a
+  default of C<AI_ADDRCONFIG> will be used.
+  
+  These flags will be combined with C<AI_PASSIVE> if the C<Listen> argument is
+  given. For more information see the documentation about C<getaddrinfo()> in
+  the L<Socket> module.
+  
+  =item Listen => INT
+  
+  If defined, puts the socket into listening mode where new connections can be
+  accepted using the C<accept> method. The value given is used as the
+  C<listen(2)> queue size.
+  
+  =item ReuseAddr => BOOL
+  
+  If true, set the C<SO_REUSEADDR> sockopt
+  
+  =item ReusePort => BOOL
+  
+  If true, set the C<SO_REUSEPORT> sockopt (not all OSes implement this sockopt)
+  
+  =item Broadcast => BOOL
+  
+  If true, set the C<SO_BROADCAST> sockopt
+  
+  =item Sockopts => ARRAY
+  
+  An optional array of other socket options to apply after the three listed
+  above. The value is an ARRAY containing 2- or 3-element ARRAYrefs. Each inner
+  array relates to a single option, giving the level and option name, and an
+  optional value. If the value element is missing, it will be given the value of
+  a platform-sized integer 1 constant (i.e. suitable to enable most of the
+  common boolean options).
+  
+  For example, both options given below are equivalent to setting C<ReuseAddr>.
+  
+   Sockopts => [
+      [ SOL_SOCKET, SO_REUSEADDR ],
+      [ SOL_SOCKET, SO_REUSEADDR, pack( "i", 1 ) ],
+   ]
+  
+  =item V6Only => BOOL
+  
+  If defined, set the C<IPV6_V6ONLY> sockopt when creating C<PF_INET6> sockets
+  to the given value. If true, a listening-mode socket will only listen on the
+  C<AF_INET6> addresses; if false it will also accept connections from
+  C<AF_INET> addresses.
+  
+  If not defined, the socket option will not be changed, and default value set
+  by the operating system will apply. For repeatable behaviour across platforms
+  it is recommended this value always be defined for listening-mode sockets.
+  
+  Note that not all platforms support disabling this option. Some, at least
+  OpenBSD and MirBSD, will fail with C<EINVAL> if you attempt to disable it.
+  To determine whether it is possible to disable, you may use the class method
+  
+   if( IO::Socket::IP->CAN_DISABLE_V6ONLY ) {
+      ...
+   }
+   else {
+      ...
+   }
+  
+  If your platform does not support disabling this option but you still want to
+  listen for both C<AF_INET> and C<AF_INET6> connections you will have to create
+  two listening sockets, one bound to each protocol.
+  
+  =item MultiHomed
+  
+  This C<IO::Socket::INET>-style argument is ignored, except if it is defined
+  but false. See the C<IO::Socket::INET> INCOMPATIBILITES section below.
+  
+  However, the behaviour it enables is always performed by C<IO::Socket::IP>.
+  
+  =item Blocking => BOOL
+  
+  If defined but false, the socket will be set to non-blocking mode. Otherwise
+  it will default to blocking mode. See the NON-BLOCKING section below for more
+  detail.
+  
+  =item Timeout => NUM
+  
+  If defined, gives a maximum time in seconds to block per C<connect()> call
+  when in blocking mode. If missing, no timeout is applied other than that
+  provided by the underlying operating system. When in non-blocking mode this
+  parameter is ignored.
+  
+  Note that if the hostname resolves to multiple address candidates, the same
+  timeout will apply to each connection attempt individually, rather than to the
+  operation as a whole. Further note that the timeout does not apply to the
+  initial hostname resolve operation, if connecting by hostname.
+  
+  This behviour is copied inspired by C<IO::Socket::INET>; for more fine grained
+  control over connection timeouts, consider performing a nonblocking connect
+  directly.
+  
+  =back
+  
+  If neither C<Type> nor C<Proto> hints are provided, a default of
+  C<SOCK_STREAM> and C<IPPROTO_TCP> respectively will be set, to maintain
+  compatibility with C<IO::Socket::INET>. Other named arguments that are not
+  recognised are ignored.
+  
+  If neither C<Family> nor any hosts or addresses are passed, nor any
+  C<*AddrInfo>, then the constructor has no information on which to decide a
+  socket family to create. In this case, it performs a C<getaddinfo> call with
+  the C<AI_ADDRCONFIG> flag, no host name, and a service name of C<"0">, and
+  uses the family of the first returned result.
+  
+  If the constructor fails, it will set C<$@> to an appropriate error message;
+  this may be from C<$!> or it may be some other string; not every failure
+  necessarily has an associated C<errno> value.
+  
+  =head2 new (one arg)
+  
+     $sock = IO::Socket::IP->new( $peeraddr )
+  
+  As a special case, if the constructor is passed a single argument (as
+  opposed to an even-sized list of key/value pairs), it is taken to be the value
+  of the C<PeerAddr> parameter. This is parsed in the same way, according to the
+  behaviour given in the C<PeerHost> AND C<LocalHost> PARSING section below.
+  
+  =cut
+  
+  sub new
+  {
+     my $class = shift;
+     my %arg = (@_ == 1) ? (PeerHost => $_[0]) : @_;
+     return $class->SUPER::new(%arg);
+  }
+  
+  # IO::Socket may call this one; neaten up the arguments from IO::Socket::INET
+  # before calling our real _configure method
+  sub configure
+  {
+     my $self = shift;
+     my ( $arg ) = @_;
+  
+     $arg->{PeerHost} = delete $arg->{PeerAddr}
+        if exists $arg->{PeerAddr} && !exists $arg->{PeerHost};
+  
+     $arg->{PeerService} = delete $arg->{PeerPort}
+        if exists $arg->{PeerPort} && !exists $arg->{PeerService};
+  
+     $arg->{LocalHost} = delete $arg->{LocalAddr}
+        if exists $arg->{LocalAddr} && !exists $arg->{LocalHost};
+  
+     $arg->{LocalService} = delete $arg->{LocalPort}
+        if exists $arg->{LocalPort} && !exists $arg->{LocalService};
+  
+     for my $type (qw(Peer Local)) {
+        my $host    = $type . 'Host';
+        my $service = $type . 'Service';
+  
+        if( defined $arg->{$host} ) {
+           ( $arg->{$host}, my $s ) = $self->split_addr( $arg->{$host} );
+           # IO::Socket::INET compat - *Host parsed port always takes precedence
+           $arg->{$service} = $s if defined $s;
+        }
+     }
+  
+     $self->_io_socket_ip__configure( $arg );
+  }
+  
+  # Avoid simply calling it _configure, as some subclasses of IO::Socket::INET on CPAN already take that
+  sub _io_socket_ip__configure
+  {
+     my $self = shift;
+     my ( $arg ) = @_;
+  
+     my %hints;
+     my @localinfos;
+     my @peerinfos;
+  
+     my $listenqueue = $arg->{Listen};
+     if( defined $listenqueue and
+         ( defined $arg->{PeerHost} || defined $arg->{PeerService} || defined $arg->{PeerAddrInfo} ) ) {
+        croak "Cannot Listen with a peer address";
+     }
+  
+     if( defined $arg->{GetAddrInfoFlags} ) {
+        $hints{flags} = $arg->{GetAddrInfoFlags};
+     }
+     else {
+        $hints{flags} = $AI_ADDRCONFIG;
+     }
+  
+     if( defined( my $family = $arg->{Family} ) ) {
+        $hints{family} = $family;
+     }
+  
+     if( defined( my $type = $arg->{Type} ) ) {
+        $hints{socktype} = $type;
+     }
+  
+     if( defined( my $proto = $arg->{Proto} ) ) {
+        unless( $proto =~ m/^\d+$/ ) {
+           my $protonum = HAVE_GETPROTOBYNAME
+              ? getprotobyname( $proto )
+              : eval { Socket->${\"IPPROTO_\U$proto"}() };
+           defined $protonum or croak "Unrecognised protocol $proto";
+           $proto = $protonum;
+        }
+  
+        $hints{protocol} = $proto;
+     }
+  
+     # To maintain compatibility with IO::Socket::INET, imply a default of
+     # SOCK_STREAM + IPPROTO_TCP if neither hint is given
+     if( !defined $hints{socktype} and !defined $hints{protocol} ) {
+        $hints{socktype} = SOCK_STREAM;
+        $hints{protocol} = IPPROTO_TCP;
+     }
+  
+     # Some OSes (NetBSD) don't seem to like just a protocol hint without a
+     # socktype hint as well. We'll set a couple of common ones
+     if( !defined $hints{socktype} and defined $hints{protocol} ) {
+        $hints{socktype} = SOCK_STREAM if $hints{protocol} == IPPROTO_TCP;
+        $hints{socktype} = SOCK_DGRAM  if $hints{protocol} == IPPROTO_UDP;
+     }
+  
+     if( my $info = $arg->{LocalAddrInfo} ) {
+        ref $info eq "ARRAY" or croak "Expected 'LocalAddrInfo' to be an ARRAY ref";
+        @localinfos = @$info;
+     }
+     elsif( defined $arg->{LocalHost} or
+            defined $arg->{LocalService} or
+            HAVE_MSWIN32 and $arg->{Listen} ) {
+        # Either may be undef
+        my $host = $arg->{LocalHost};
+        my $service = $arg->{LocalService};
+  
+        unless ( defined $host or defined $service ) {
+           $service = 0;
+        }
+  
+        local $1; # Placate a taint-related bug; [perl #67962]
+        defined $service and $service =~ s/\((\d+)\)$// and
+           my $fallback_port = $1;
+  
+        my %localhints = %hints;
+        $localhints{flags} |= AI_PASSIVE;
+        ( my $err, @localinfos ) = getaddrinfo( $host, $service, \%localhints );
+  
+        if( $err and defined $fallback_port ) {
+           ( $err, @localinfos ) = getaddrinfo( $host, $fallback_port, \%localhints );
+        }
+  
+        if( $err ) {
+           $@ = "$err";
+           $! = EINVAL;
+           return;
+        }
+     }
+  
+     if( my $info = $arg->{PeerAddrInfo} ) {
+        ref $info eq "ARRAY" or croak "Expected 'PeerAddrInfo' to be an ARRAY ref";
+        @peerinfos = @$info;
+     }
+     elsif( defined $arg->{PeerHost} or defined $arg->{PeerService} ) {
+        defined( my $host = $arg->{PeerHost} ) or
+           croak "Expected 'PeerHost'";
+        defined( my $service = $arg->{PeerService} ) or
+           croak "Expected 'PeerService'";
+  
+        local $1; # Placate a taint-related bug; [perl #67962]
+        defined $service and $service =~ s/\((\d+)\)$// and
+           my $fallback_port = $1;
+  
+        ( my $err, @peerinfos ) = getaddrinfo( $host, $service, \%hints );
+  
+        if( $err and defined $fallback_port ) {
+           ( $err, @peerinfos ) = getaddrinfo( $host, $fallback_port, \%hints );
+        }
+  
+        if( $err ) {
+           $@ = "$err";
+           $! = EINVAL;
+           return;
+        }
+     }
+  
+     my $INT_1 = pack "i", 1;
+  
+     my @sockopts_enabled;
+     push @sockopts_enabled, [ SOL_SOCKET, SO_REUSEADDR, $INT_1 ] if $arg->{ReuseAddr};
+     push @sockopts_enabled, [ SOL_SOCKET, SO_REUSEPORT, $INT_1 ] if $arg->{ReusePort};
+     push @sockopts_enabled, [ SOL_SOCKET, SO_BROADCAST, $INT_1 ] if $arg->{Broadcast};
+  
+     if( my $sockopts = $arg->{Sockopts} ) {
+        ref $sockopts eq "ARRAY" or croak "Expected 'Sockopts' to be an ARRAY ref";
+        foreach ( @$sockopts ) {
+           ref $_ eq "ARRAY" or croak "Bad Sockopts item - expected ARRAYref";
+           @$_ >= 2 and @$_ <= 3 or
+              croak "Bad Sockopts item - expected 2 or 3 elements";
+  
+           my ( $level, $optname, $value ) = @$_;
+           # TODO: consider more sanity checking on argument values
+  
+           defined $value or $value = $INT_1;
+           push @sockopts_enabled, [ $level, $optname, $value ];
+        }
+     }
+  
+     my $blocking = $arg->{Blocking};
+     defined $blocking or $blocking = 1;
+  
+     my $v6only = $arg->{V6Only};
+  
+     # IO::Socket::INET defines this key. IO::Socket::IP always implements the
+     # behaviour it requests, so we can ignore it, unless the caller is for some
+     # reason asking to disable it.
+     if( defined $arg->{MultiHomed} and !$arg->{MultiHomed} ) {
+        croak "Cannot disable the MultiHomed parameter";
+     }
+  
+     my @infos;
+     foreach my $local ( @localinfos ? @localinfos : {} ) {
+        foreach my $peer ( @peerinfos ? @peerinfos : {} ) {
+           next if defined $local->{family}   and defined $peer->{family}   and
+              $local->{family} != $peer->{family};
+           next if defined $local->{socktype} and defined $peer->{socktype} and
+              $local->{socktype} != $peer->{socktype};
+           next if defined $local->{protocol} and defined $peer->{protocol} and
+              $local->{protocol} != $peer->{protocol};
+  
+           my $family   = $local->{family}   || $peer->{family}   or next;
+           my $socktype = $local->{socktype} || $peer->{socktype} or next;
+           my $protocol = $local->{protocol} || $peer->{protocol} || 0;
+  
+           push @infos, {
+              family    => $family,
+              socktype  => $socktype,
+              protocol  => $protocol,
+              localaddr => $local->{addr},
+              peeraddr  => $peer->{addr},
+           };
+        }
+     }
+  
+     if( !@infos ) {
+        # If there was a Family hint then create a plain unbound, unconnected socket
+        if( defined $hints{family} ) {
+           @infos = ( {
+              family   => $hints{family},
+              socktype => $hints{socktype},
+              protocol => $hints{protocol},
+           } );
+        }
+        # If there wasn't, use getaddrinfo()'s AI_ADDRCONFIG side-effect to guess a
+        # suitable family first.
+        else {
+           ( my $err, @infos ) = getaddrinfo( "", "0", \%hints );
+           if( $err ) {
+              $@ = "$err";
+              $! = EINVAL;
+              return;
+           }
+  
+           # We'll take all the @infos anyway, because some OSes (HPUX) are known to
+           # ignore the AI_ADDRCONFIG hint and return AF_INET6 even if they don't
+           # support them
+        }
+     }
+  
+     # In the nonblocking case, caller will be calling ->setup multiple times.
+     # Store configuration in the object for the ->setup method
+     # Yes, these are messy. Sorry, I can't help that...
+  
+     ${*$self}{io_socket_ip_infos} = \@infos;
+  
+     ${*$self}{io_socket_ip_idx} = -1;
+  
+     ${*$self}{io_socket_ip_sockopts} = \@sockopts_enabled;
+     ${*$self}{io_socket_ip_v6only} = $v6only;
+     ${*$self}{io_socket_ip_listenqueue} = $listenqueue;
+     ${*$self}{io_socket_ip_blocking} = $blocking;
+  
+     ${*$self}{io_socket_ip_errors} = [ undef, undef, undef ];
+  
+     # ->setup is allowed to return false in nonblocking mode
+     $self->setup or !$blocking or return undef;
+  
+     return $self;
+  }
+  
+  sub setup
+  {
+     my $self = shift;
+  
+     while(1) {
+        ${*$self}{io_socket_ip_idx}++;
+        last if ${*$self}{io_socket_ip_idx} >= @{ ${*$self}{io_socket_ip_infos} };
+  
+        my $info = ${*$self}{io_socket_ip_infos}->[${*$self}{io_socket_ip_idx}];
+  
+        $self->socket( @{$info}{qw( family socktype protocol )} ) or
+           ( ${*$self}{io_socket_ip_errors}[2] = $!, next );
+  
+        $self->blocking( 0 ) unless ${*$self}{io_socket_ip_blocking};
+  
+        foreach my $sockopt ( @{ ${*$self}{io_socket_ip_sockopts} } ) {
+           my ( $level, $optname, $value ) = @$sockopt;
+           $self->setsockopt( $level, $optname, $value ) or ( $@ = "$!", return undef );
+        }
+  
+        if( defined ${*$self}{io_socket_ip_v6only} and defined $AF_INET6 and $info->{family} == $AF_INET6 ) {
+           my $v6only = ${*$self}{io_socket_ip_v6only};
+           $self->setsockopt( IPPROTO_IPV6, IPV6_V6ONLY, pack "i", $v6only ) or ( $@ = "$!", return undef );
+        }
+  
+        if( defined( my $addr = $info->{localaddr} ) ) {
+           $self->bind( $addr ) or
+              ( ${*$self}{io_socket_ip_errors}[1] = $!, next );
+        }
+  
+        if( defined( my $listenqueue = ${*$self}{io_socket_ip_listenqueue} ) ) {
+           $self->listen( $listenqueue ) or ( $@ = "$!", return undef );
+        }
+  
+        if( defined( my $addr = $info->{peeraddr} ) ) {
+           if( $self->connect( $addr ) ) {
+              $! = 0;
+              return 1;
+           }
+  
+           if( $! == EINPROGRESS or $! == EWOULDBLOCK ) {
+              ${*$self}{io_socket_ip_connect_in_progress} = 1;
+              return 0;
+           }
+  
+           # If connect failed but we have no system error there must be an error
+           # at the application layer, like a bad certificate with
+           # IO::Socket::SSL.
+           # In this case don't continue IP based multi-homing because the problem
+           # cannot be solved at the IP layer.
+           return 0 if ! $!;
+  
+           ${*$self}{io_socket_ip_errors}[0] = $!;
+           next;
+        }
+  
+        return 1;
+     }
+  
+     # Pick the most appropriate error, stringified
+     $! = ( grep defined, @{ ${*$self}{io_socket_ip_errors}} )[0];
+     $@ = "$!";
+     return undef;
+  }
+  
+  sub connect :method
+  {
+     my $self = shift;
+  
+     # It seems that IO::Socket hides EINPROGRESS errors, making them look like
+     # a success. This is annoying here.
+     # Instead of putting up with its frankly-irritating intentional breakage of
+     # useful APIs I'm just going to end-run around it and call core's connect()
+     # directly
+  
+     if( @_ ) {
+        my ( $addr ) = @_;
+  
+        # Annoyingly IO::Socket's connect() is where the timeout logic is
+        # implemented, so we'll have to reinvent it here
+        my $timeout = ${*$self}{'io_socket_timeout'};
+  
+        return connect( $self, $addr ) unless defined $timeout;
+  
+        my $was_blocking = $self->blocking( 0 );
+  
+        my $err = defined connect( $self, $addr ) ? 0 : $!+0;
+  
+        if( !$err ) {
+           # All happy
+           $self->blocking( $was_blocking );
+           return 1;
+        }
+        elsif( not( $err == EINPROGRESS or $err == EWOULDBLOCK ) ) {
+           # Failed for some other reason
+           $self->blocking( $was_blocking );
+           return undef;
+        }
+        elsif( !$was_blocking ) {
+           # We shouldn't block anyway
+           return undef;
+        }
+  
+        my $vec = ''; vec( $vec, $self->fileno, 1 ) = 1;
+        if( !select( undef, $vec, $vec, $timeout ) ) {
+           $self->blocking( $was_blocking );
+           $! = ETIMEDOUT;
+           return undef;
+        }
+  
+        # Hoist the error by connect()ing a second time
+        $err = $self->getsockopt( SOL_SOCKET, SO_ERROR );
+        $err = 0 if $err == EISCONN; # Some OSes give EISCONN
+  
+        $self->blocking( $was_blocking );
+  
+        $! = $err, return undef if $err;
+        return 1;
+     }
+  
+     return 1 if !${*$self}{io_socket_ip_connect_in_progress};
+  
+     # See if a connect attempt has just failed with an error
+     if( my $errno = $self->getsockopt( SOL_SOCKET, SO_ERROR ) ) {
+        delete ${*$self}{io_socket_ip_connect_in_progress};
+        ${*$self}{io_socket_ip_errors}[0] = $! = $errno;
+        return $self->setup;
+     }
+  
+     # No error, so either connect is still in progress, or has completed
+     # successfully. We can tell by trying to connect() again; either it will
+     # succeed or we'll get EISCONN (connected successfully), or EALREADY
+     # (still in progress). This even works on MSWin32.
+     my $addr = ${*$self}{io_socket_ip_infos}[${*$self}{io_socket_ip_idx}]{peeraddr};
+  
+     if( connect( $self, $addr ) or $! == EISCONN ) {
+        delete ${*$self}{io_socket_ip_connect_in_progress};
+        $! = 0;
+        return 1;
+     }
+     else {
+        $! = EINPROGRESS;
+        return 0;
+     }
+  }
+  
+  sub connected
+  {
+     my $self = shift;
+     return defined $self->fileno &&
+            !${*$self}{io_socket_ip_connect_in_progress} &&
+            defined getpeername( $self ); # ->peername caches, we need to detect disconnection
+  }
+  
+  =head1 METHODS
+  
+  As well as the following methods, this class inherits all the methods in
+  L<IO::Socket> and L<IO::Handle>.
+  
+  =cut
+  
+  sub _get_host_service
+  {
+     my $self = shift;
+     my ( $addr, $flags, $xflags ) = @_;
+  
+     defined $addr or
+        $! = ENOTCONN, return;
+  
+     $flags |= NI_DGRAM if $self->socktype == SOCK_DGRAM;
+  
+     my ( $err, $host, $service ) = getnameinfo( $addr, $flags, $xflags || 0 );
+     croak "getnameinfo - $err" if $err;
+  
+     return ( $host, $service );
+  }
+  
+  sub _unpack_sockaddr
+  {
+     my ( $addr ) = @_;
+     my $family = sockaddr_family $addr;
+  
+     if( $family == AF_INET ) {
+        return ( Socket::unpack_sockaddr_in( $addr ) )[1];
+     }
+     elsif( defined $AF_INET6 and $family == $AF_INET6 ) {
+        return ( Socket::unpack_sockaddr_in6( $addr ) )[1];
+     }
+     else {
+        croak "Unrecognised address family $family";
+     }
+  }
+  
+  =head2 sockhost_service
+  
+     ( $host, $service ) = $sock->sockhost_service( $numeric )
+  
+  Returns the hostname and service name of the local address (that is, the
+  socket address given by the C<sockname> method).
+  
+  If C<$numeric> is true, these will be given in numeric form rather than being
+  resolved into names.
+  
+  The following four convenience wrappers may be used to obtain one of the two
+  values returned here. If both host and service names are required, this method
+  is preferable to the following wrappers, because it will call
+  C<getnameinfo(3)> only once.
+  
+  =cut
+  
+  sub sockhost_service
+  {
+     my $self = shift;
+     my ( $numeric ) = @_;
+  
+     $self->_get_host_service( $self->sockname, $numeric ? NI_NUMERICHOST|NI_NUMERICSERV : 0 );
+  }
+  
+  =head2 sockhost
+  
+     $addr = $sock->sockhost
+  
+  Return the numeric form of the local address as a textual representation
+  
+  =head2 sockport
+  
+     $port = $sock->sockport
+  
+  Return the numeric form of the local port number
+  
+  =head2 sockhostname
+  
+     $host = $sock->sockhostname
+  
+  Return the resolved name of the local address
+  
+  =head2 sockservice
+  
+     $service = $sock->sockservice
+  
+  Return the resolved name of the local port number
+  
+  =cut
+  
+  sub sockhost { my $self = shift; scalar +( $self->_get_host_service( $self->sockname, NI_NUMERICHOST, NIx_NOSERV ) )[0] }
+  sub sockport { my $self = shift; scalar +( $self->_get_host_service( $self->sockname, NI_NUMERICSERV, NIx_NOHOST ) )[1] }
+  
+  sub sockhostname { my $self = shift; scalar +( $self->_get_host_service( $self->sockname, 0, NIx_NOSERV ) )[0] }
+  sub sockservice  { my $self = shift; scalar +( $self->_get_host_service( $self->sockname, 0, NIx_NOHOST ) )[1] }
+  
+  =head2 sockaddr
+  
+     $addr = $sock->sockaddr
+  
+  Return the local address as a binary octet string
+  
+  =cut
+  
+  sub sockaddr { my $self = shift; _unpack_sockaddr $self->sockname }
+  
+  =head2 peerhost_service
+  
+     ( $host, $service ) = $sock->peerhost_service( $numeric )
+  
+  Returns the hostname and service name of the peer address (that is, the
+  socket address given by the C<peername> method), similar to the
+  C<sockhost_service> method.
+  
+  The following four convenience wrappers may be used to obtain one of the two
+  values returned here. If both host and service names are required, this method
+  is preferable to the following wrappers, because it will call
+  C<getnameinfo(3)> only once.
+  
+  =cut
+  
+  sub peerhost_service
+  {
+     my $self = shift;
+     my ( $numeric ) = @_;
+  
+     $self->_get_host_service( $self->peername, $numeric ? NI_NUMERICHOST|NI_NUMERICSERV : 0 );
+  }
+  
+  =head2 peerhost
+  
+     $addr = $sock->peerhost
+  
+  Return the numeric form of the peer address as a textual representation
+  
+  =head2 peerport
+  
+     $port = $sock->peerport
+  
+  Return the numeric form of the peer port number
+  
+  =head2 peerhostname
+  
+     $host = $sock->peerhostname
+  
+  Return the resolved name of the peer address
+  
+  =head2 peerservice
+  
+     $service = $sock->peerservice
+  
+  Return the resolved name of the peer port number
+  
+  =cut
+  
+  sub peerhost { my $self = shift; scalar +( $self->_get_host_service( $self->peername, NI_NUMERICHOST, NIx_NOSERV ) )[0] }
+  sub peerport { my $self = shift; scalar +( $self->_get_host_service( $self->peername, NI_NUMERICSERV, NIx_NOHOST ) )[1] }
+  
+  sub peerhostname { my $self = shift; scalar +( $self->_get_host_service( $self->peername, 0, NIx_NOSERV ) )[0] }
+  sub peerservice  { my $self = shift; scalar +( $self->_get_host_service( $self->peername, 0, NIx_NOHOST ) )[1] }
+  
+  =head2 peeraddr
+  
+     $addr = $peer->peeraddr
+  
+  Return the peer address as a binary octet string
+  
+  =cut
+  
+  sub peeraddr { my $self = shift; _unpack_sockaddr $self->peername }
+  
+  # This unbelievably dodgy hack works around the bug that IO::Socket doesn't do
+  # it
+  #    https://rt.cpan.org/Ticket/Display.html?id=61577
+  sub accept
+  {
+     my $self = shift;
+     my ( $new, $peer ) = $self->SUPER::accept( @_ ) or return;
+  
+     ${*$new}{$_} = ${*$self}{$_} for qw( io_socket_domain io_socket_type io_socket_proto );
+  
+     return wantarray ? ( $new, $peer )
+                      : $new;
+  }
+  
+  # This second unbelievably dodgy hack guarantees that $self->fileno doesn't
+  # change, which is useful during nonblocking connect
+  sub socket :method
+  {
+     my $self = shift;
+     return $self->SUPER::socket(@_) if not defined $self->fileno;
+  
+     # I hate core prototypes sometimes...
+     socket( my $tmph, $_[0], $_[1], $_[2] ) or return undef;
+  
+     dup2( $tmph->fileno, $self->fileno ) or die "Unable to dup2 $tmph onto $self - $!";
+  }
+  
+  # Versions of IO::Socket before 1.35 may leave socktype undef if from, say, an
+  #   ->fdopen call. In this case we'll apply a fix
+  BEGIN {
+     if( eval($IO::Socket::VERSION) < 1.35 ) {
+        *socktype = sub {
+           my $self = shift;
+           my $type = $self->SUPER::socktype;
+           if( !defined $type ) {
+              $type = $self->sockopt( Socket::SO_TYPE() );
+           }
+           return $type;
+        };
+     }
+  }
+  
+  =head2 as_inet
+  
+     $inet = $sock->as_inet
+  
+  Returns a new L<IO::Socket::INET> instance wrapping the same filehandle. This
+  may be useful in cases where it is required, for backward-compatibility, to
+  have a real object of C<IO::Socket::INET> type instead of C<IO::Socket::IP>.
+  The new object will wrap the same underlying socket filehandle as the
+  original, so care should be taken not to continue to use both objects
+  concurrently. Ideally the original C<$sock> should be discarded after this
+  method is called.
+  
+  This method checks that the socket domain is C<PF_INET> and will throw an
+  exception if it isn't.
+  
+  =cut
+  
+  sub as_inet
+  {
+     my $self = shift;
+     croak "Cannot downgrade a non-PF_INET socket to IO::Socket::INET" unless $self->sockdomain == AF_INET;
+     return IO::Socket::INET->new_from_fd( $self->fileno, "r+" );
+  }
+  
+  =head1 NON-BLOCKING
+  
+  If the constructor is passed a defined but false value for the C<Blocking>
+  argument then the socket is put into non-blocking mode. When in non-blocking
+  mode, the socket will not be set up by the time the constructor returns,
+  because the underlying C<connect(2)> syscall would otherwise have to block.
+  
+  The non-blocking behaviour is an extension of the C<IO::Socket::INET> API,
+  unique to C<IO::Socket::IP>, because the former does not support multi-homed
+  non-blocking connect.
+  
+  When using non-blocking mode, the caller must repeatedly check for
+  writeability on the filehandle (for instance using C<select> or C<IO::Poll>).
+  Each time the filehandle is ready to write, the C<connect> method must be
+  called, with no arguments. Note that some operating systems, most notably
+  C<MSWin32> do not report a C<connect()> failure using write-ready; so you must
+  also C<select()> for exceptional status.
+  
+  While C<connect> returns false, the value of C<$!> indicates whether it should
+  be tried again (by being set to the value C<EINPROGRESS>, or C<EWOULDBLOCK> on
+  MSWin32), or whether a permanent error has occurred (e.g. C<ECONNREFUSED>).
+  
+  Once the socket has been connected to the peer, C<connect> will return true
+  and the socket will now be ready to use.
+  
+  Note that calls to the platform's underlying C<getaddrinfo(3)> function may
+  block. If C<IO::Socket::IP> has to perform this lookup, the constructor will
+  block even when in non-blocking mode.
+  
+  To avoid this blocking behaviour, the caller should pass in the result of such
+  a lookup using the C<PeerAddrInfo> or C<LocalAddrInfo> arguments. This can be
+  achieved by using L<Net::LibAsyncNS>, or the C<getaddrinfo(3)> function can be
+  called in a child process.
+  
+   use IO::Socket::IP;
+   use Errno qw( EINPROGRESS EWOULDBLOCK );
+  
+   my @peeraddrinfo = ... # Caller must obtain the getaddinfo result here
+  
+   my $socket = IO::Socket::IP->new(
+      PeerAddrInfo => \@peeraddrinfo,
+      Blocking     => 0,
+   ) or die "Cannot construct socket - $@";
+  
+   while( !$socket->connect and ( $! == EINPROGRESS || $! == EWOULDBLOCK ) ) {
+      my $wvec = '';
+      vec( $wvec, fileno $socket, 1 ) = 1;
+      my $evec = '';
+      vec( $evec, fileno $socket, 1 ) = 1;
+  
+      select( undef, $wvec, $evec, undef ) or die "Cannot select - $!";
+   }
+  
+   die "Cannot connect - $!" if $!;
+  
+   ...
+  
+  The example above uses C<select()>, but any similar mechanism should work
+  analogously. C<IO::Socket::IP> takes care when creating new socket filehandles
+  to preserve the actual file descriptor number, so such techniques as C<poll>
+  or C<epoll> should be transparent to its reallocation of a different socket
+  underneath, perhaps in order to switch protocol family between C<PF_INET> and
+  C<PF_INET6>.
+  
+  For another example using C<IO::Poll> and C<Net::LibAsyncNS>, see the
+  F<examples/nonblocking_libasyncns.pl> file in the module distribution.
+  
+  =cut
+  
+  =head1 C<PeerHost> AND C<LocalHost> PARSING
+  
+  To support the C<IO::Socket::INET> API, the host and port information may be
+  passed in a single string rather than as two separate arguments.
+  
+  If either C<LocalHost> or C<PeerHost> (or their C<...Addr> synonyms) have any
+  of the following special forms then special parsing is applied.
+  
+  The value of the C<...Host> argument will be split to give both the hostname
+  and port (or service name):
+  
+   hostname.example.org:http    # Host name
+   192.0.2.1:80                 # IPv4 address
+   [2001:db8::1]:80             # IPv6 address
+  
+  In each case, the port or service name (e.g. C<80>) is passed as the
+  C<LocalService> or C<PeerService> argument.
+  
+  Either of C<LocalService> or C<PeerService> (or their C<...Port> synonyms) can
+  be either a service name, a decimal number, or a string containing both a
+  service name and number, in a form such as
+  
+   http(80)
+  
+  In this case, the name (C<http>) will be tried first, but if the resolver does
+  not understand it then the port number (C<80>) will be used instead.
+  
+  If the C<...Host> argument is in this special form and the corresponding
+  C<...Service> or C<...Port> argument is also defined, the one parsed from
+  the C<...Host> argument will take precedence and the other will be ignored.
+  
+  =head2 split_addr
+  
+     ( $host, $port ) = IO::Socket::IP->split_addr( $addr )
+  
+  Utility method that provides the parsing functionality described above.
+  Returns a 2-element list, containing either the split hostname and port
+  description if it could be parsed, or the given address and C<undef> if it was
+  not recognised.
+  
+   IO::Socket::IP->split_addr( "hostname:http" )
+                                # ( "hostname",  "http" )
+  
+   IO::Socket::IP->split_addr( "192.0.2.1:80" )
+                                # ( "192.0.2.1", "80"   )
+  
+   IO::Socket::IP->split_addr( "[2001:db8::1]:80" )
+                                # ( "2001:db8::1", "80" )
+  
+   IO::Socket::IP->split_addr( "something.else" )
+                                # ( "something.else", undef )
+  
+  =cut
+  
+  sub split_addr
+  {
+     shift;
+     my ( $addr ) = @_;
+  
+     local ( $1, $2 ); # Placate a taint-related bug; [perl #67962]
+     if( $addr =~ m/\A\[($IPv6_re)\](?::([^\s:]*))?\z/ or
+         $addr =~ m/\A([^\s:]*):([^\s:]*)\z/ ) {
+        return ( $1, $2 ) if defined $2 and length $2;
+        return ( $1, undef );
+     }
+  
+     return ( $addr, undef );
+  }
+  
+  =head2 join_addr
+  
+     $addr = IO::Socket::IP->join_addr( $host, $port )
+  
+  Utility method that performs the reverse of C<split_addr>, returning a string
+  formed by joining the specified host address and port number. The host address
+  will be wrapped in C<[]> brackets if required (because it is a raw IPv6
+  numeric address).
+  
+  This can be especially useful when combined with the C<sockhost_service> or
+  C<peerhost_service> methods.
+  
+   say "Connected to ", IO::Socket::IP->join_addr( $sock->peerhost_service );
+  
+  =cut
+  
+  sub join_addr
+  {
+     shift;
+     my ( $host, $port ) = @_;
+  
+     $host = "[$host]" if $host =~ m/:/;
+  
+     return join ":", $host, $port if defined $port;
+     return $host;
+  }
+  
+  # Since IO::Socket->new( Domain => ... ) will delete the Domain parameter
+  # before calling ->configure, we need to keep track of which it was
+  
+  package # hide from indexer
+     IO::Socket::IP::_ForINET;
+  use base qw( IO::Socket::IP );
+  
+  sub configure
+  {
+     # This is evil
+     my $self = shift;
+     my ( $arg ) = @_;
+  
+     bless $self, "IO::Socket::IP";
+     $self->configure( { %$arg, Family => Socket::AF_INET() } );
+  }
+  
+  package # hide from indexer
+     IO::Socket::IP::_ForINET6;
+  use base qw( IO::Socket::IP );
+  
+  sub configure
+  {
+     # This is evil
+     my $self = shift;
+     my ( $arg ) = @_;
+  
+     bless $self, "IO::Socket::IP";
+     $self->configure( { %$arg, Family => Socket::AF_INET6() } );
+  }
+  
+  =head1 C<IO::Socket::INET> INCOMPATIBILITES
+  
+  =over 4
+  
+  =item *
+  
+  The behaviour enabled by C<MultiHomed> is in fact implemented by
+  C<IO::Socket::IP> as it is required to correctly support searching for a
+  useable address from the results of the C<getaddrinfo(3)> call. The
+  constructor will ignore the value of this argument, except if it is defined
+  but false. An exception is thrown in this case, because that would request it
+  disable the C<getaddrinfo(3)> search behaviour in the first place.
+  
+  =item *
+  
+  C<IO::Socket::IP> implements both the C<Blocking> and C<Timeout> parameters,
+  but it implements the interaction of both in a different way.
+  
+  In C<::INET>, supplying a timeout overrides the non-blocking behaviour,
+  meaning that the C<connect()> operation will still block despite that the
+  caller asked for a non-blocking socket. This is not explicitly specified in
+  its documentation, nor does this author believe that is a useful behaviour -
+  it appears to come from a quirk of implementation.
+  
+  In C<::IP> therefore, the C<Blocking> parameter takes precedence - if a
+  non-blocking socket is requested, no operation will block. The C<Timeout>
+  parameter here simply defines the maximum time that a blocking C<connect()>
+  call will wait, if it blocks at all.
+  
+  In order to specifically obtain the "blocking connect then non-blocking send
+  and receive" behaviour of specifying this combination of options to C<::INET>
+  when using C<::IP>, perform first a blocking connect, then afterwards turn the
+  socket into nonblocking mode.
+  
+   my $sock = IO::Socket::IP->new(
+      PeerHost => $peer,
+      Timeout => 20,
+   ) or die "Cannot connect - $@";
+  
+   $sock->blocking( 0 );
+  
+  This code will behave identically under both C<IO::Socket::INET> and
+  C<IO::Socket::IP>.
+  
+  =back
+  
+  =cut
+  
+  =head1 TODO
+  
+  =over 4
+  
+  =item *
+  
+  Investigate whether C<POSIX::dup2> upsets BSD's C<kqueue> watchers, and if so,
+  consider what possible workarounds might be applied.
+  
+  =back
+  
+  =head1 AUTHOR
+  
+  Paul Evans <leonerd@leonerd.org.uk>
+  
+  =cut
+  
+  0x55AA;
+IO_SOCKET_IP
 
 $fatpacked{"JSON/MaybeXS.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'JSON_MAYBEXS';
   package JSON::MaybeXS;
@@ -25638,13 +30715,19 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   use Carp ();
   use Exporter;
   
-  our $VERSION = '1.28';
+  our $VERSION = '1.35';
   
   use parent 'Exporter';
   
-  our @EXPORT = qw( timegm timelocal );
-  our @EXPORT_OK
-      = qw( timegm_modern timelocal_modern timegm_nocheck timelocal_nocheck );
+  our @EXPORT    = qw( timegm timelocal );
+  our @EXPORT_OK = qw(
+      timegm_modern
+      timelocal_modern
+      timegm_nocheck
+      timelocal_nocheck
+      timegm_posix
+      timelocal_posix
+  );
   
   my @MonthDays = ( 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 );
   
@@ -25685,6 +30768,18 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   else {
       # recent localtime()'s limit is the year 2**31
       $MaxDay = 365 * ( 2**31 );
+  
+      # On (some?) 32-bit platforms this overflows and we end up with a negative
+      # $MaxDay, which totally breaks this module. This is the old calculation
+      # we used from the days before Perl always had 64-bit time_t.
+      if ( $MaxDay < 0 ) {
+          require Config;
+          ## no critic (Variables::ProhibitPackageVars)
+          my $max_int
+              = ( ( 1 << ( 8 * $Config::Config{intsize} - 2 ) ) - 1 ) * 2 + 1;
+          $MaxDay
+              = int( ( $max_int - ( SECS_PER_DAY / 2 ) ) / SECS_PER_DAY ) - 1;
+      }
   }
   
   # Determine the EPOC day for this machine
@@ -25707,7 +30802,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
       $Epoc = _daygm( gmtime(0) );
   }
   
-  %Cheat = ();         # clear the cache as epoc has changed
+  %Cheat = ();    # clear the cache as epoc has changed
   
   sub _daygm {
   
@@ -25722,8 +30817,9 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
                   + int( $year / 4 )
                       - int( $year / 100 )
                       + int( $year / 400 )
-                      + int( ( ( $month * 306 ) + 5 ) / 10 ) ) - $Epoc;
-              }
+                      + int( ( ( $month * 306 ) + 5 ) / 10 ) )
+                  - $Epoc;
+          }
       );
   }
   
@@ -25738,11 +30834,13 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   sub timegm {
       my ( $sec, $min, $hour, $mday, $month, $year ) = @_;
+      my $subsec = $sec - int($sec);
+      $sec = int($sec);
   
       if ( $Options{no_year_munging} ) {
           $year -= 1900;
       }
-      else {
+      elsif ( !$Options{posix_year} ) {
           if ( $year >= 1000 ) {
               $year -= 1900;
           }
@@ -25772,9 +30870,8 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
       my $days = _daygm( undef, undef, undef, $mday, $month, $year );
   
-      unless ( $Options{no_range_check} or abs($days) < $MaxDay ) {
-          my $msg = q{};
-          $msg .= "Day too big - $days > $MaxDay\n" if $days > $MaxDay;
+      if ( abs($days) > $MaxDay && !$Options{no_range_check} ) {
+          my $msg = "Day too big - abs($days) > $MaxDay\n";
   
           $year += 1900;
           $msg
@@ -25783,11 +30880,16 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
           Carp::croak($msg);
       }
   
-      return
-            $sec + $SecOff
-          + ( SECS_PER_MINUTE * $min )
-          + ( SECS_PER_HOUR * $hour )
-          + ( SECS_PER_DAY * $days );
+      # Adding in the $subsec value last seems to prevent floating point errors
+      # from creeping in.
+      return (
+          (
+                    $sec + $SecOff
+                  + ( SECS_PER_MINUTE * $min )
+                  + ( SECS_PER_HOUR * $hour )
+                  + ( SECS_PER_DAY * $days )
+          ) + $subsec
+      );
   }
   
   sub _is_leap_year {
@@ -25808,12 +30910,22 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
       return &timegm;
   }
   
+  sub timegm_posix {
+      local $Options{posix_year} = 1;
+      return &timegm;
+  }
+  
   sub timelocal {
+      my $sec    = shift;
+      my $subsec = $sec - int($sec);
+      $sec = int($sec);
+      unshift @_, $sec;
+  
       my $ref_t         = &timegm;
       my $loc_for_ref_t = _timegm( localtime($ref_t) );
   
       my $zone_off = $loc_for_ref_t - $ref_t
-          or return $loc_for_ref_t;
+          or return $loc_for_ref_t + $subsec;
   
       # Adjust for timezone
       my $loc_t = $ref_t - $zone_off;
@@ -25829,20 +30941,20 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
           && ( ( $ref_t - SECS_PER_HOUR )
               - _timegm( localtime( $loc_t - SECS_PER_HOUR ) ) < 0 )
       ) {
-          return $loc_t - SECS_PER_HOUR;
+          return ( $loc_t - SECS_PER_HOUR ) + $subsec;
       }
   
       # Adjust for DST change
       $loc_t += $dst_off;
   
-      return $loc_t if $dst_off > 0;
+      return $loc_t + $subsec if $dst_off > 0;
   
-      # If the original date was a non-extent gap in a forward DST jump,
-      # we should now have the wrong answer - undo the DST adjustment
+      # If the original date was a non-existent gap in a forward DST jump, we
+      # should now have the wrong answer - undo the DST adjustment
       my ( $s, $m, $h ) = localtime($loc_t);
       $loc_t -= $dst_off if $s != $_[0] || $m != $_[1] || $h != $_[2];
   
-      return $loc_t;
+      return $loc_t + $subsec;
   }
   
   sub timelocal_nocheck {
@@ -25852,6 +30964,11 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   sub timelocal_modern {
       local $Options{no_year_munging} = 1;
+      return &timelocal;
+  }
+  
+  sub timelocal_posix {
+      local $Options{posix_year} = 1;
       return &timelocal;
   }
   
@@ -25871,14 +30988,14 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head1 VERSION
   
-  version 1.28
+  version 1.35
   
   =head1 SYNOPSIS
   
-      use Time::Local;
+      use Time::Local qw( timelocal_posix timegm_posix );
   
-      my $time = timelocal( $sec, $min, $hour, $mday, $mon, $year );
-      my $time = timegm( $sec, $min, $hour, $mday, $mon, $year );
+      my $time = timelocal_posix( $sec, $min, $hour, $mday, $mon, $year );
+      my $time = timegm_posix( $sec, $min, $hour, $mday, $mon, $year );
   
   =head1 DESCRIPTION
   
@@ -25896,7 +31013,37 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head1 FUNCTIONS
   
+  =head2 C<timelocal_posix()> and C<timegm_posix()>
+  
+  I<Since version 1.30.>
+  
+  These functions are the exact inverse of Perl's built-in C<localtime> and
+  C<gmtime> functions. That means that calling C<< timelocal_posix(
+  localtime($value) ) >> will always give you the same C<$value> you started
+  with. The same applies to C<< timegm_posix( gmtime($value) ) >>.
+  
+  The one exception is when the value returned from C<localtime()> represents an
+  ambiguous local time because of a DST change. See the documentation below for
+  more details.
+  
+  These functions expect the year value to be the number of years since 1900,
+  which is what the C<localtime()> and C<gmtime()> built-ins returns.
+  
+  They perform range checking by default on the input C<$sec>, C<$min>, C<$hour>,
+  C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>) if given a
+  value outside the allowed ranges.
+  
+  While it would be nice to make this the default behavior, that would almost
+  certainly break a lot of code, so you must explicitly import these functions
+  and use them instead of the default C<timelocal()> and C<timegm()>.
+  
+  You are B<strongly> encouraged to use these functions in any new code which
+  uses this module. It will almost certainly make your code's behavior less
+  surprising.
+  
   =head2 C<timelocal_modern()> and C<timegm_modern()>
+  
+  I<Since version 1.27.>
   
   When C<Time::Local> was first written, it was a common practice to represent
   years as a two-digit value like C<99> for C<1999> or C<1> for C<2001>. This
@@ -25907,56 +31054,58 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   calculation when given a year value less than 1000. This leads to surprising
   results in many cases. See L</Year Value Interpretation> for details.
   
-  The C<time*_modern()> subs do not do this year munging and simply take the
+  The C<time*_modern()> functions do not do this year munging and simply take the
   year value as provided.
   
-  While it would be nice to make this the default behavior, that would almost
-  certainly break a lot of code, so you must explicitly import these subs and
-  use them instead of the default C<timelocal()> and C<timegm()>.
-  
-  You are B<strongly> encouraged to use these subs in any new code which uses
-  this module. It will almost certainly make your code's behavior less
-  surprising.
+  They perform range checking by default on the input C<$sec>, C<$min>, C<$hour>,
+  C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>) if given a
+  value outside the allowed ranges.
   
   =head2 C<timelocal()> and C<timegm()>
   
   This module exports two functions by default, C<timelocal()> and C<timegm()>.
   
-  The C<timelocal()> and C<timegm()> functions perform range checking on the
-  input $sec, $min, $hour, $mday, and $mon values by default.
+  They perform range checking by default on the input C<$sec>, C<$min>, C<$hour>,
+  C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>) if given a
+  value outside the allowed ranges.
+  
+  B<Warning: The year value interpretation that these functions and their nocheck
+  variants use will almost certainly lead to bugs in your code, if not now, then
+  in the future. You are strongly discouraged from using these in new code, and
+  you should convert old code to using either the C<*_posix> or C<*_modern>
+  functions if possible.>
   
   =head2 C<timelocal_nocheck()> and C<timegm_nocheck()>
   
-  If you are working with data you know to be valid, you can speed your code up
-  by using the "nocheck" variants, C<timelocal_nocheck()> and
-  C<timegm_nocheck()>. These variants must be explicitly imported.
+  If you are working with data you know to be valid, you can use the "nocheck"
+  variants, C<timelocal_nocheck()> and C<timegm_nocheck()>. These variants must
+  be explicitly imported.
   
-      use Time::Local 'timelocal_nocheck';
+  If you supply data which is not valid (month 27, second 1,000) the results will
+  be unpredictable (so don't do that).
   
-      # The 365th day of 1999
-      print scalar localtime timelocal_nocheck( 0, 0, 0, 365, 0, 99 );
-  
-  If you supply data which is not valid (month 27, second 1,000) the results
-  will be unpredictable (so don't do that).
+  Note that my benchmarks show that this is just a 3% speed increase over the
+  checked versions, so unless calling C<Time::Local> is the hottest spot in your
+  application, using these nocheck variants is unlikely to have much impact on
+  your application.
   
   =head2 Year Value Interpretation
   
-  B<This does not apply to C<timelocal_modern> or C<timegm_modern>. Use those
+  B<This does not apply to the C<*_posix> or C<*_modern> functions. Use those
   exports if you want to ensure consistent behavior as your code ages.>
   
   Strictly speaking, the year should be specified in a form consistent with
   C<localtime()>, i.e. the offset from 1900. In order to make the interpretation
-  of the year easier for humans, however, who are more accustomed to seeing
-  years as two-digit or four-digit values, the following conventions are
-  followed:
+  of the year easier for humans, however, who are more accustomed to seeing years
+  as two-digit or four-digit values, the following conventions are followed:
   
   =over 4
   
   =item *
   
   Years greater than 999 are interpreted as being the actual year, rather than
-  the offset from 1900. Thus, 1964 would indicate the year Martin Luther King
-  won the Nobel prize, not the year 3864.
+  the offset from 1900. Thus, 1964 would indicate the year Martin Luther King won
+  the Nobel prize, not the year 3864.
   
   =item *
   
@@ -25967,16 +31116,18 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   =item *
   
   Years in the range 0..99 are interpreted as shorthand for years in the rolling
-  "current century," defined as 50 years on either side of the current
-  year. Thus, today, in 1999, 0 would refer to 2000, and 45 to 2045, but 55
-  would refer to 1955. Twenty years from now, 55 would instead refer to
-  2055. This is messy, but matches the way people currently think about two
-  digit dates. Whenever possible, use an absolute four digit year instead.
+  "current century," defined as 50 years on either side of the current year.
+  Thus, today, in 1999, 0 would refer to 2000, and 45 to 2045, but 55 would refer
+  to 1955. Twenty years from now, 55 would instead refer to 2055. This is messy,
+  but matches the way people currently think about two digit dates. Whenever
+  possible, use an absolute four digit year instead.
   
   =back
   
   The scheme above allows interpretation of a wide range of dates, particularly
-  if 4-digit years are used.
+  if 4-digit years are used. But it also means that the behavior of your code
+  changes as time passes, because the rolling "current century" changes each
+  year.
   
   =head2 Limits of time_t
   
@@ -26000,15 +31151,15 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   "Europe/Paris" time zone, the local time of 2001-10-28 02:30:00 can represent
   either 2001-10-28 00:30:00 GMT, B<or> 2001-10-28 01:30:00 GMT.
   
-  When given an ambiguous local time, the timelocal() function should always
-  return the epoch for the I<earlier> of the two possible GMT times.
+  When given an ambiguous local time, the timelocal() function will always return
+  the epoch for the I<earlier> of the two possible GMT times.
   
   =head2 Non-Existent Local Times (DST)
   
-  When a DST change causes a locale clock to skip one hour forward, there will
-  be an hour's worth of local times that don't exist. Again, for the
-  "Europe/Paris" time zone, the local clock jumped from 2001-03-25 01:59:59 to
-  2001-03-25 03:00:00.
+  When a DST change causes a locale clock to skip one hour forward, there will be
+  an hour's worth of local times that don't exist. Again, for the "Europe/Paris"
+  time zone, the local clock jumped from 2001-03-25 01:59:59 to 2001-03-25
+  03:00:00.
   
   If the C<timelocal()> function is given a non-existent local time, it will
   simply return an epoch value for the time one hour later.
@@ -26031,21 +31182,20 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   C<localtime()> and C<gmtime()>. We manage this by caching the start times of
   any months we've seen before. If we know the start time of the month, we can
   always calculate any time within the month.  The start times are calculated
-  using a mathematical formula. Unlike other algorithms that do multiple calls
-  to C<gmtime()>.
+  using a mathematical formula. Unlike other algorithms that do multiple calls to
+  C<gmtime()>.
   
-  The C<timelocal()> function is implemented using the same cache. We just
-  assume that we're translating a GMT time, and then fudge it when we're done
-  for the timezone and daylight savings arguments. Note that the timezone is
-  evaluated for each date because countries occasionally change their official
-  timezones. Assuming that C<localtime()> corrects for these changes, this
-  routine will also be correct.
+  The C<timelocal()> function is implemented using the same cache. We just assume
+  that we're translating a GMT time, and then fudge it when we're done for the
+  timezone and daylight savings arguments. Note that the timezone is evaluated
+  for each date because countries occasionally change their official timezones.
+  Assuming that C<localtime()> corrects for these changes, this routine will also
+  be correct.
   
   =head1 AUTHORS EMERITUS
   
-  This module is based on a Perl 4 library, timelocal.pl, that was
-  included with Perl 4.036, and was most likely written by Tom
-  Christiansen.
+  This module is based on a Perl 4 library, timelocal.pl, that was included with
+  Perl 4.036, and was most likely written by Tom Christiansen.
   
   The current version was written by Graham Barr.
   
@@ -26058,8 +31208,6 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   There is a mailing list available for users of this distribution,
   L<mailto:datetime@perl.org>.
   
-  I am also usually active on IRC as 'autarch' on C<irc://irc.perl.org>.
-  
   =head1 SOURCE
   
   The source code repository for Time-Local can be found at L<https://github.com/houseabsolute/Time-Local>.
@@ -26070,7 +31218,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head1 CONTRIBUTORS
   
-  =for stopwords Florian Ragwitz J. Nick Koston Unknown
+  =for stopwords Florian Ragwitz Gregory Oschwald J. Nick Koston Tom Wyant Unknown
   
   =over 4
   
@@ -26080,7 +31228,15 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =item *
   
+  Gregory Oschwald <oschwald@gmail.com>
+  
+  =item *
+  
   J. Nick Koston <nick@cpanel.net>
+  
+  =item *
+  
+  Tom Wyant <wyant@cpan.org>
   
   =item *
   
@@ -26090,7 +31246,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head1 COPYRIGHT AND LICENSE
   
-  This software is copyright (c) 1997 - 2018 by Graham Barr & Dave Rolsky.
+  This software is copyright (c) 1997 - 2023 by Graham Barr & Dave Rolsky.
   
   This is free software; you can redistribute it and/or modify it under
   the same terms as the Perl 5 programming language system itself.
@@ -28858,6 +34014,108 @@ $fatpacked{"WWW/Form/UrlEncoded/PP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\
   =cut
   
 WWW_FORM_URLENCODED_PP
+
+$fatpacked{"darwin-thread-multi-2level/Clone.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'DARWIN-THREAD-MULTI-2LEVEL_CLONE';
+  package Clone;
+  
+  use strict;
+  our $AUTOLOAD;
+  
+  require Exporter;
+  require AutoLoader;
+  use XSLoader ();
+  
+  our @ISA       = qw(Exporter);
+  our @EXPORT;
+  our @EXPORT_OK = qw( clone );
+  
+  our $VERSION = '0.46';
+  
+  XSLoader::load('Clone', $VERSION);
+  
+  1;
+  __END__
+  
+  =head1 NAME
+  
+  Clone - recursively copy Perl datatypes
+  
+  =for html
+  <a href="https://travis-ci.org/garu/Clone"><img src="https://travis-ci.org/garu/Clone.png?branch=master" alt="Build Status"></a>
+  <a href="https://coveralls.io/r/garu/Clone?branch=master"><img src="https://coveralls.io/repos/garu/Clone/badge.png?branch=master" alt="Coverage Status"></a>
+  <a href="https://metacpan.org/pod/Clone"><img src="https://badge.fury.io/pl/Clone.svg" alt="CPAN version"></a>
+  
+  =head1 SYNOPSIS
+  
+      use Clone 'clone';
+  
+      my $data = {
+         set => [ 1 .. 50 ],
+         foo => {
+             answer => 42,
+             object => SomeObject->new,
+         },
+      };
+  
+      my $cloned_data = clone($data);
+  
+      $cloned_data->{foo}{answer} = 1;
+      print $cloned_data->{foo}{answer};  # '1'
+      print $data->{foo}{answer};         # '42'
+  
+  You can also add it to your class:
+  
+      package Foo;
+      use parent 'Clone';
+      sub new { bless {}, shift }
+  
+      package main;
+  
+      my $obj = Foo->new;
+      my $copy = $obj->clone;
+  
+  =head1 DESCRIPTION
+  
+  This module provides a C<clone()> method which makes recursive
+  copies of nested hash, array, scalar and reference types,
+  including tied variables and objects.
+  
+  C<clone()> takes a scalar argument and duplicates it. To duplicate lists,
+  arrays or hashes, pass them in by reference, e.g.
+  
+      my $copy = clone (\@array);
+  
+      # or
+  
+      my %copy = %{ clone (\%hash) };
+  
+  =head1 SEE ALSO
+  
+  L<Storable>'s C<dclone()> is a flexible solution for cloning variables,
+  albeit slower for average-sized data structures. Simple
+  and naive benchmarks show that Clone is faster for data structures
+  with 3 or fewer levels, while C<dclone()> can be faster for structures
+  4 or more levels deep.
+  
+  =head1 COPYRIGHT
+  
+  Copyright 2001-2022 Ray Finch. All Rights Reserved.
+  
+  This module is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =head1 AUTHOR
+  
+  Ray Finch C<< <rdf@cpan.org> >>
+  
+  Breno G. de Oliveira C<< <garu@cpan.org> >>,
+  Nicolas Rochelemagne C<< <atoomic@cpan.org> >>
+  and
+  Florian Ragwitz C<< <rafl@debian.org> >> perform routine maintenance
+  releases since 2012.
+  
+  =cut
+DARWIN-THREAD-MULTI-2LEVEL_CLONE
 
 $fatpacked{"darwin-thread-multi-2level/List/Util.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'DARWIN-THREAD-MULTI-2LEVEL_LIST_UTIL';
   # Copyright (c) 1997-2009 Graham Barr <gbarr@pobox.com>. All rights reserved.

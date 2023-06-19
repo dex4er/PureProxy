@@ -1,12 +1,12 @@
 requires 'perl', '5.008001';
 
+requires 'IO::Socket::IP';
 requires 'Plack', '0.9920';
 requires 'Plack::App::Proxy::Backend::HTTP::Tiny';
 requires 'Plack::Middleware::Proxy::Connect::IO';
 requires 'Plack::Middleware::Proxy::Requests';
 requires 'Starlight', '0.0501';
 
-recommends 'IO::Socket::IP';
 recommends 'Plack::Middleware::TrafficLog';
 recommends 'Thrall', '0.0402';
 
@@ -16,6 +16,7 @@ suggests 'Net::SSLeay', '1.49';
 on configure => sub {
     requires 'Module::Build';
     requires 'Module::CPANfile';
+    requires 'Software::License';
 };
 
 on test => sub {
