@@ -14,12 +14,59 @@ permissions:
   contents: read
 
 jobs:
-  dist_sh:
+  dist_sh_develop:
     strategy:
       fail-fast: false
       matrix:
         perl-version:
           - "5.36"
+
+    runs-on: ubuntu-latest
+
+    container:
+      image: perl:${{ matrix.perl-version }}-threaded
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Use cache
+        uses: actions/cache@v3
+        with:
+          path: local/
+          key: cpm-ci-dist-sh-develop-${{ matrix.perl-version }}-${{ runner.os }}-${{ hashFiles('cpanfile') }}
+
+      - name: Use local Perl packages
+        run: |
+          echo "$GITHUB_WORKSPACE/local/bin" | tee -a $GITHUB_PATH
+          echo "PERL5LIB=$GITHUB_WORKSPACE/local/lib/perl5" | tee -a $GITHUB_ENV
+
+      - name: Install cpm
+        run: curl -fsSL https://raw.githubusercontent.com/skaji/cpm/main/cpm | perl - install --color --no-test App::cpm
+
+      - name: Install required dependencies
+        run: cpm install --color --no-test --with-configure --with-recommends --with-suggests
+
+      - name: Install develop dependencies
+        run: cpm install --color --no-test --with-develop
+
+      - name: Install fatpack dependencies
+        run: cpm install --color --no-test --feature=fatpack
+
+      - name: Reinstall fatpack dependencies
+        run: cpm install --color --no-test --reinstall if parent Exporter HTTP::Date HTTP::Status HTTP::Tiny Module::Load Time::Local Try::Tiny
+
+      - name: Make distribution
+        run: ./Dist.SH
+
+      - name: Make fatpack
+        run: ./fatpack/fatpack.sh
+
+  dist_sh:
+    strategy:
+      fail-fast: false
+      matrix:
+        perl-version:
           - "5.34"
           - "5.32"
           - "5.30"
@@ -46,7 +93,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: local/
-          key: cpm-ci-${{ matrix.perl-version }}-${{ runner.os }}-${{ hashFiles('cpanfile') }}
+          key: cpm-ci-dist-sh-${{ matrix.perl-version }}-${{ runner.os }}-${{ hashFiles('cpanfile') }}
 
       - name: Use local Perl packages
         run: |
@@ -59,24 +106,7 @@ jobs:
       - name: Install required dependencies
         run: cpm install --color --no-test --with-configure --with-recommends --with-suggests
 
-      - name: Install extra dependencies
-        if: matrix.perl-version == '5.36'
-        run: cpm install --color --no-test --with-develop
-
-      - name: Install fatpack dependencies
-        if: matrix.perl-version == '5.36'
-        run: cpm install --color --no-test --feature=fatpack
-
-      - name: Reinstall fatpack dependencies
-        if: matrix.perl-version == '5.36'
-        run: cpm install --color --no-test --reinstall if parent Exporter HTTP::Date HTTP::Status HTTP::Tiny Module::Load Time::Local Try::Tiny
-
-      - name: Skip extra tests
-        run: echo 'TEST_SKIP_EXTRA=${{ (matrix.perl-version == '5.36' && 'perlcritic.t') || '1' }}' >> $GITHUB_ENV
-
       - name: Make distribution
         run: ./Dist.SH
-
-      - name: Make fatpack
-        if: matrix.perl-version == '5.36'
-        run: ./fatpack/fatpack.sh
+        env:
+          TEST_SKIP_DEVELOP: "1"
