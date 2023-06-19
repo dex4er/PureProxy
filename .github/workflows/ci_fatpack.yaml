@@ -1,0 +1,52 @@
+name: CI fatpack
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - fatpack/pureproxy
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - fatpack/pureproxy
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test_fatpack_pureproxy:
+    strategy:
+      fail-fast: false
+      matrix:
+        perl-version:
+          - "5.36"
+          - "5.34"
+          - "5.32"
+          - "5.30"
+          - "5.28"
+          - "5.26"
+          - "5.24"
+          - "5.22"
+          - "5.20"
+          - "5.18"
+          - "5.16"
+          - "5.14"
+          - "5.12"
+          - "5.10"
+          - "5.8"
+
+    runs-on: ubuntu-latest
+
+    container:
+      image: perl:${{ matrix.perl-version }}-threaded
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Test fatpacked script
+        run: ./fatpack/pureproxy -v
