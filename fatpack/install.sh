@@ -4,12 +4,10 @@ url='https://raw.githubusercontent.com/dex4er/PureProxy/master/fatpack/pureproxy
 script='pureproxy'
 
 if command -v curl >/dev/null; then
-    get='curl -skL'
+    get='curl -qsSL'
 elif command -v wget >/dev/null; then
-    get='wget --no-check-certificate -O- --quiet'
+    get='wget -O- --quiet'
 elif command -v lwp-request >/dev/null; then
-    PERL_LWP_SSL_VERIFY_HOSTNAME=0
-    export PERL_LWP_SSL_VERIFY_HOSTNAME
     get='lwp-request -m get'
 fi
 
@@ -25,16 +23,11 @@ echo "Installing ${script} to ${dir}"
 echo ""
 
 if ! echo ":${PATH}:" | grep ":${dir}:" >/dev/null; then
-    if [ -f "${HOME}/.bash_profile" ]; then
-        profile="${HOME}/.bash_profile"
-    else
-        profile="${HOME}/.profile"
-    fi
     echo "Please add"
     echo ""
     echo "PATH=\"${dir}:\$PATH\""
     echo ""
-    echo "to your ${profile} file"
+    echo "to your ~/.zshrc or ~/.bash_profile or ~/.profile file"
     echo ""
 fi
 
