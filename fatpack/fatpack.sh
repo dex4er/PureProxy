@@ -35,6 +35,8 @@ use=$(
 
 delete=$(
     for mod in \
+        Clone \
+        List::Util \
         Sub::Name \
         Time::TZOffset; do
         path=$(echo "${mod}" | sed 's,::,/,g')
@@ -52,7 +54,7 @@ rm -rf fatlib
 # shellcheck disable=SC2086
 PLACK_HTTP_PARSER_PP=1 ${FATPACK} trace ${use} ../script/pureproxy.pl
 
-${PERL} -pi -e "${delete}" fatpacker.trace
+${PERL} -ni -e "${delete}; print" fatpacker.trace
 
 # shellcheck disable=SC2046
 ${FATPACK} packlists-for $(cat fatpacker.trace) >packlists
@@ -86,12 +88,16 @@ for mod in \
     fi
 done
 
+eval "$(${PERL} -V:archname)"
+
 rm -rf fatlib/auto/share
+rm -rf "fatlib/${archname}"
 find fatlib \( -name .keep -o -name '*.bundle' -o -name '*.ix' -o -name '*.pod' \) -print0 | xargs -0r rm -f
 
 ${FATPACK} file ../script/pureproxy.pl >pureproxy
 
 ${PERL} -pi -e 's{^#!.*/perl$}{#!/usr/bin/env perl}' pureproxy
+${PERL} -MConfig -pi -e 's{$Config{archname}/}{}' pureproxy
 chmod +x pureproxy
 
 ${PERL} ./pureproxy -v
