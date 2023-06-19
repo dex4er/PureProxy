@@ -34,8 +34,8 @@ ENVIRONMENT
 
  PUREPROXY_SERVER
 
-    Changes the default PSGI server. This is Thrall for MSWin32 and cygwin
-    and Starlight otherwise.
+    Changes the default PSGI server. This is Thrall if Perl supports
+    threads and Starlight otherwise.
 
 INSTALLATION
 

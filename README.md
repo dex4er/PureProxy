@@ -44,7 +44,7 @@ for fat-packed version of PureProxy script.
 
 ## PUREPROXY\_SERVER
 
-Changes the default PSGI server. This is [Thrall](https://metacpan.org/pod/Thrall) for `MSWin32` and `cygwin`
+Changes the default PSGI server. This is [Thrall](https://metacpan.org/pod/Thrall) if Perl supports threads
 and [Starlight](https://metacpan.org/pod/Starlight) otherwise.
 
 ## INSTALLATION

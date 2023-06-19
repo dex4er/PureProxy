@@ -34,7 +34,6 @@ BEGIN {
 use Config;
 
 use constant SERVER => $ENV{PUREPROXY_SERVER}
-    || $^O =~ /MSWin32|cygwin/
     || $Config{useithreads} ? 'Thrall' : 'Starlight';
 
 BEGIN {
@@ -147,7 +146,7 @@ __END__
 
 =head2 PUREPROXY_SERVER
 
-Changes the default PSGI server. This is L<Thrall> for C<MSWin32> and C<cygwin>
+Changes the default PSGI server. This is L<Thrall> if Perl supports threads
 and L<Starlight> otherwise.
 
 =head1 INSTALLATION
