@@ -11,7 +11,7 @@ use warnings;
 
 no warnings;
 
-our $VERSION = '0.0101';
+our $VERSION = '0.0200';
 
 BEGIN {
     if ($INC[0] =~ /^FatPacked::/) {
