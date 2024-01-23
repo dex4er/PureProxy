@@ -98,7 +98,7 @@ ${FATPACK} file ../script/pureproxy.pl >pureproxy
 
 ${PERL} -pi -e 's{^#!.*/perl$}{#!/usr/bin/env perl}' pureproxy
 ${PERL} -MConfig -pi -e 's{$Config{archname}/}{}' pureproxy
-${PERL} -MText::Unidecode=unidecode -CSD -0777 -pi -e 'unidecode $_' pureproxy 
+${PERL} -MText::Unidecode=unidecode -CSD -0777 -pi -e 'unidecode $_' pureproxy
 chmod +x pureproxy
 
 ${PERL} ./pureproxy -v

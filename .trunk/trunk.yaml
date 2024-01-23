@@ -1,70 +1,30 @@
 version: 0.1
 cli:
-  version: 1.10.0
+  version: 1.19.0
 plugins:
   sources:
     - id: trunk
-      ref: v0.0.17
+      ref: v1.4.2
       uri: https://github.com/trunk-io/plugins
 lint:
-  definitions:
-    - name: perlcritic
-      commands:
-        - output: regex
-          success_codes:
-            - 0
-            - 1
-            - 2
-          formatter: false
-          in_place: false
-          parse_regex: (path=(?P<path>.*),line=(?P<line>.*),col=(?P<col>.*),code=(?P<code>.*),message=(?P<message>.*))
-          read_output_from: stdout
-          name: lint
-          run: perlcritic --verbose 'path=%f,line=%l,col=%c,code=%p,message=%m\n' ${target}
-      files:
-        - perl
-      direct_configs:
-        - .perlcriticrc
-      suggest_if: config_present
-    - name: perltidy
-      commands:
-        - output: rewrite
-          success_codes:
-            - 0
-            - 1
-          formatter: true
-          read_output_from: stdout
-          name: format
-          run: perltidy -se ${target}
-      files:
-        - perl
-      direct_configs:
-        - .perltidyrc
-      suggest_if: config_present
   enabled:
-    - actionlint@1.6.25
+    - actionlint@1.6.26
     - git-diff-check
-    - gitleaks@8.17.0
-    - markdownlint@0.34.0
+    - gitleaks@8.18.1
+    - markdownlint@0.38.0
     - perlcritic
     - perltidy
-    - prettier@2.8.8
+    - prettier@3.2.4
     - shellcheck@0.9.0
-    - shfmt@3.5.0
-    - yamllint@1.32.0
-  files:
-    - name: perl
-      comments:
-        - hash
-      extensions:
-        - pl
-        - PL
-        - pm
-        - psgi
-        - t
+    - shfmt@3.6.0
+    - yamllint@1.33.0
+  disabled:
+    - checkov
+    - trivy
+    - trufflehog
 runtimes:
   enabled:
-    - go@1.19.5
+    - go@1.21.0
     - node@18.12.1
     - python@3.10.8
 actions:
