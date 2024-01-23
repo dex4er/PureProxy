@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     container:
-      image: perl:5.36-threaded
+      image: perl:5.38-threaded
 
     steps:
       - name: Checkout

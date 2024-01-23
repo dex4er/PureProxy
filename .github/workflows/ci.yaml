@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         perl-version:
-          - "5.36"
+          - "5.38"
 
     runs-on: ubuntu-latest
 

@@ -529,7 +529,7 @@ $fatpacked{"Cookie/Baker.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'CO
   use URI::Escape;
   
   BEGIN {
-      our $VERSION = "0.11";
+      our $VERSION = "0.12";
       our @EXPORT = qw/bake_cookie crush_cookie/;
       my $use_pp = $ENV{COOKIE_BAKER_PP};
       if (!$use_pp) {
@@ -555,6 +555,11 @@ $fatpacked{"Cookie/Baker.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'CO
   
       return '' unless defined $val;
       my %args = ref $val ? %{$val} : (value => $val);
+      if ($args{partitioned}) {
+          # enforce SameSite=None; and secure; on CHIPS (Cookies Having Independent Partitioned State)
+          $args{samesite} = 'none';
+          $args{secure} = 1;
+      }
       $name = URI::Escape::uri_escape($name) if $name =~ m![^a-zA-Z\-\._~]!;
       my $cookie = "$name=" . URI::Escape::uri_escape($args{value}) . '; ';
       $cookie .= 'domain=' . $args{domain} . '; '  if $args{domain};
@@ -562,10 +567,14 @@ $fatpacked{"Cookie/Baker.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'CO
       $cookie .= 'expires=' . _date($args{expires}) . '; ' if exists $args{expires} && defined $args{expires};
       $cookie .= 'max-age=' . $args{"max-age"} . '; ' if exists $args{"max-age"};
       if (exists $args{samesite} && $args{samesite} =~ m/^(?:lax|strict|none)/i) {
-          $cookie .= 'SameSite=' . ucfirst(lc($args{samesite})) . '; '
+          $cookie .= 'SameSite=' . ucfirst(lc($args{samesite})) . '; ';
+          # secure flag must be set when SameSite=None
+          $args{secure} = 1 if $cookie =~ m/SameSite=None; /;
       }
       $cookie .= 'secure; '                     if $args{secure};
       $cookie .= 'HttpOnly; '                   if $args{httponly};
+      $cookie .= 'Partitioned; '                if $args{partitioned};
+  
       substr($cookie,-2,2,'');
       $cookie;
   }
@@ -689,6 +698,11 @@ $fatpacked{"Cookie/Baker.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'CO
   =item domain
   
   Cookie's domain.
+  
+  =item partitioned
+  
+  If true, sets Partitioned flag, and also enforces secure, SameSite=None. false by default.
+  L<Cookies Having Independent Partitioned State specification|https://www.ietf.org/archive/id/draft-cutler-httpbis-partitioned-cookies-00.html>
   
   =item expires
   
@@ -1365,269 +1379,13 @@ $fatpacked{"Exporter.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'EXPORT
   
 EXPORTER
 
-$fatpacked{"Exporter/Heavy.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'EXPORTER_HEAVY';
-  package Exporter::Heavy;
-  
-  use strict;
-  no strict 'refs';
-  
-  # On one line so MakeMaker will see it.
-  our $VERSION = '5.77';
-  
-  =head1 NAME
-  
-  Exporter::Heavy - Exporter guts
-  
-  =head1 SYNOPSIS
-  
-  (internal use only)
-  
-  =head1 DESCRIPTION
-  
-  No user-serviceable parts inside.
-  
-  =cut
-  
-  #
-  # We go to a lot of trouble not to 'require Carp' at file scope,
-  #  because Carp requires Exporter, and something has to give.
-  #
-  
-  sub _rebuild_cache {
-      my ($pkg, $exports, $cache) = @_;
-      s/^&// foreach @$exports;
-      @{$cache}{@$exports} = (1) x @$exports;
-      my $ok = \@{"${pkg}::EXPORT_OK"};
-      if (@$ok) {
-  	s/^&// foreach @$ok;
-  	@{$cache}{@$ok} = (1) x @$ok;
-      }
-  }
-  
-  sub heavy_export {
-  
-      # Save the old __WARN__ handler in case it was defined
-      my $oldwarn = $SIG{__WARN__};
-  
-      # First make import warnings look like they're coming from the "use".
-      local $SIG{__WARN__} = sub {
-  	# restore it back so proper stacking occurs
-  	local $SIG{__WARN__} = $oldwarn;
-  	my $text = shift;
-  	if ($text =~ s/ at \S*Exporter\S*.pm line \d+.*\n//) {
-  	    require Carp;
-  	    local $Carp::CarpLevel = 1;	# ignore package calling us too.
-  	    Carp::carp($text);
-  	}
-  	else {
-  	    warn $text;
-  	}
-      };
-      local $SIG{__DIE__} = sub {
-  	require Carp;
-  	local $Carp::CarpLevel = 1;	# ignore package calling us too.
-  	Carp::croak("$_[0]Illegal null symbol in \@${1}::EXPORT")
-  	    if $_[0] =~ /^Unable to create sub named "(.*?)::"/;
-      };
-  
-      my($pkg, $callpkg, @imports) = @_;
-      my($type, $sym, $cache_is_current, $oops);
-      my($exports, $export_cache) = (\@{"${pkg}::EXPORT"},
-                                     $Exporter::Cache{$pkg} ||= {});
-  
-      if (@imports) {
-  	if (!%$export_cache) {
-  	    _rebuild_cache ($pkg, $exports, $export_cache);
-  	    $cache_is_current = 1;
-  	}
-  
-  	if (grep m{^[/!:]}, @imports) {
-  	    my $tagsref = \%{"${pkg}::EXPORT_TAGS"};
-  	    my $tagdata;
-  	    my %imports;
-  	    my($remove, $spec, @names, @allexports);
-  	    # negated first item implies starting with default set:
-  	    unshift @imports, ':DEFAULT' if $imports[0] =~ m/^!/;
-  	    foreach $spec (@imports){
-  		$remove = $spec =~ s/^!//;
-  
-  		if ($spec =~ s/^://){
-  		    if ($spec eq 'DEFAULT'){
-  			@names = @$exports;
-  		    }
-  		    elsif ($tagdata = $tagsref->{$spec}) {
-  			@names = @$tagdata;
-  		    }
-  		    else {
-  			warn qq["$spec" is not defined in %${pkg}::EXPORT_TAGS];
-  			++$oops;
-  			next;
-  		    }
-  		}
-  		elsif ($spec =~ m:^/(.*)/$:){
-  		    my $patn = $1;
-  		    @allexports = keys %$export_cache unless @allexports; # only do keys once
-  		    @names = grep(/$patn/, @allexports); # not anchored by default
-  		}
-  		else {
-  		    @names = ($spec); # is a normal symbol name
-  		}
-  
-  		warn "Import ".($remove ? "del":"add").": @names "
-  		    if $Exporter::Verbose;
-  
-  		if ($remove) {
-  		   foreach $sym (@names) { delete $imports{$sym} } 
-  		}
-  		else {
-  		    @imports{@names} = (1) x @names;
-  		}
-  	    }
-  	    @imports = keys %imports;
-  	}
-  
-          my @carp;
-  	foreach $sym (@imports) {
-  	    if (!$export_cache->{$sym}) {
-  		if ($sym =~ m/^\d/) {
-  		    $pkg->VERSION($sym); # inherit from UNIVERSAL
-  		    # If the version number was the only thing specified
-  		    # then we should act as if nothing was specified:
-  		    if (@imports == 1) {
-  			@imports = @$exports;
-  			last;
-  		    }
-  		    # We need a way to emulate 'use Foo ()' but still
-  		    # allow an easy version check: "use Foo 1.23, ''";
-  		    if (@imports == 2 and !$imports[1]) {
-  			@imports = ();
-  			last;
-  		    }
-  		} elsif ($sym !~ s/^&// || !$export_cache->{$sym}) {
-  		    # Last chance - see if they've updated EXPORT_OK since we
-  		    # cached it.
-  
-  		    unless ($cache_is_current) {
-  			%$export_cache = ();
-  			_rebuild_cache ($pkg, $exports, $export_cache);
-  			$cache_is_current = 1;
-  		    }
-  
-  		    if (!$export_cache->{$sym}) {
-  			# accumulate the non-exports
-  			push @carp,
-  			  qq["$sym" is not exported by the $pkg module];
-  			$oops++;
-  		    }
-  		}
-  	    }
-  	}
-  	if ($oops) {
-  	    require Carp;
-  	    Carp::croak(join("\n", @carp, "Can't continue after import errors"));
-  	}
-      }
-      else {
-  	@imports = @$exports;
-      }
-  
-      my($fail, $fail_cache) = (\@{"${pkg}::EXPORT_FAIL"},
-                                $Exporter::FailCache{$pkg} ||= {});
-  
-      if (@$fail) {
-  	if (!%$fail_cache) {
-  	    # Build cache of symbols. Optimise the lookup by adding
-  	    # barewords twice... both with and without a leading &.
-  	    # (Technique could be applied to $export_cache at cost of memory)
-  	    my @expanded = map { /^\w/ ? ($_, '&'.$_) : $_ } @$fail;
-  	    warn "${pkg}::EXPORT_FAIL cached: @expanded" if $Exporter::Verbose;
-  	    @{$fail_cache}{@expanded} = (1) x @expanded;
-  	}
-  	my @failed;
-  	foreach $sym (@imports) { push(@failed, $sym) if $fail_cache->{$sym} }
-  	if (@failed) {
-  	    @failed = $pkg->export_fail(@failed);
-  	    foreach $sym (@failed) {
-                  require Carp;
-  		Carp::carp(qq["$sym" is not implemented by the $pkg module ],
-  			"on this architecture");
-  	    }
-  	    if (@failed) {
-  		require Carp;
-  		Carp::croak("Can't continue after import errors");
-  	    }
-  	}
-      }
-  
-      warn "Importing into $callpkg from $pkg: ",
-  		join(", ",sort @imports) if $Exporter::Verbose;
-  
-      foreach $sym (@imports) {
-  	# shortcut for the common case of no type character
-  	(*{"${callpkg}::$sym"} = \&{"${pkg}::$sym"}, next)
-  	    unless $sym =~ s/^(\W)//;
-  	$type = $1;
-  	no warnings 'once';
-  	*{"${callpkg}::$sym"} =
-  	    $type eq '&' ? \&{"${pkg}::$sym"} :
-  	    $type eq '$' ? \${"${pkg}::$sym"} :
-  	    $type eq '@' ? \@{"${pkg}::$sym"} :
-  	    $type eq '%' ? \%{"${pkg}::$sym"} :
-  	    $type eq '*' ?  *{"${pkg}::$sym"} :
-  	    do { require Carp; Carp::croak("Can't export symbol: $type$sym") };
-      }
-  }
-  
-  sub heavy_export_to_level
-  {
-        my $pkg = shift;
-        my $level = shift;
-        (undef) = shift;			# XXX redundant arg
-        my $callpkg = caller($level);
-        $pkg->export($callpkg, @_);
-  }
-  
-  # Utility functions
-  
-  sub _push_tags {
-      my($pkg, $var, $syms) = @_;
-      my @nontag = ();
-      my $export_tags = \%{"${pkg}::EXPORT_TAGS"};
-      push(@{"${pkg}::$var"},
-  	map { $export_tags->{$_} ? @{$export_tags->{$_}} 
-                                   : scalar(push(@nontag,$_),$_) }
-  		(@$syms) ? @$syms : keys %$export_tags);
-      if (@nontag and $^W) {
-  	# This may change to a die one day
-  	require Carp;
-  	Carp::carp(join(", ", @nontag)." are not tags of $pkg");
-      }
-  }
-  
-  sub heavy_require_version {
-      my($self, $wanted) = @_;
-      my $pkg = ref $self || $self;
-      return ${pkg}->VERSION($wanted);
-  }
-  
-  sub heavy_export_tags {
-    _push_tags((caller)[0], "EXPORT",    \@_);
-  }
-  
-  sub heavy_export_ok_tags {
-    _push_tags((caller)[0], "EXPORT_OK", \@_);
-  }
-  
-  1;
-EXPORTER_HEAVY
-
 $fatpacked{"HTTP/Config.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_CONFIG';
   package HTTP::Config;
   
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   use URI;
   
@@ -1873,7 +1631,7 @@ $fatpacked{"HTTP/Config.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTT
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 SYNOPSIS
   
@@ -2087,7 +1845,7 @@ $fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   use strict;
   
-  our $VERSION = '6.05';
+  our $VERSION = '6.06';
   
   require Exporter;
   our @ISA       = qw(Exporter);
@@ -2264,7 +2022,7 @@ $fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
           ||
   
-          # Windows 'dir' 11-12-96  03:52PM
+          # Windows 'dir': '11-12-96  03:52PM' and four-digit year variant
           (
           ( $mon, $day, $yr, $hr, $min, $ampm )
           = /^
@@ -2272,7 +2030,7 @@ $fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
                -
             (\d{2})                # day
                -
-            (\d{2})                # year
+            (\d{2,4})              # year
                \s+
             (\d\d?):(\d\d)([APap][Mm])  # hour:min AM or PM
                \s*$
@@ -2374,7 +2132,7 @@ $fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =head1 VERSION
   
-  version 6.05
+  version 6.06
   
   =head1 SYNOPSIS
   
@@ -2463,7 +2221,8 @@ $fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
    "Feb  3  1994"      -- Unix 'ls -l' format
    "Feb  3 17:03"      -- Unix 'ls -l' format
   
-   "11-15-96  03:52PM" -- Windows 'dir' format
+   "11-15-96  03:52PM"   -- Windows 'dir' format
+   "11-15-1996  03:52PM" -- Windows 'dir' format with four-digit year
   
   The parser ignores leading and trailing whitespace.  It also allow the
   seconds to be missing and the month to be numerical in most formats.
@@ -2495,7 +2254,7 @@ $fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =head1 COPYRIGHT AND LICENSE
   
-  This software is copyright (c) 1995-2019 by Gisle Aas.
+  This software is copyright (c) 1995 by Gisle Aas.
   
   This is free software; you can redistribute it and/or modify it under
   the same terms as the Perl 5 programming language system itself.
@@ -3209,7 +2968,7 @@ $fatpacked{"HTTP/Headers.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HT
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   use Clone qw(clone);
   use Carp ();
@@ -3669,7 +3428,7 @@ $fatpacked{"HTTP/Headers.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HT
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 SYNOPSIS
   
@@ -4091,7 +3850,7 @@ $fatpacked{"HTTP/Headers/Auth.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   use HTTP::Headers;
   
@@ -4199,7 +3958,7 @@ $fatpacked{"HTTP/Headers/Auth.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 AUTHOR
   
@@ -4221,7 +3980,7 @@ $fatpacked{"HTTP/Headers/ETag.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   require HTTP::Date;
   
@@ -4325,7 +4084,7 @@ $fatpacked{"HTTP/Headers/ETag.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 AUTHOR
   
@@ -5068,7 +4827,7 @@ $fatpacked{"HTTP/Headers/Util.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   use Exporter 5.57 'import';
   
@@ -5168,7 +4927,7 @@ $fatpacked{"HTTP/Headers/Util.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 SYNOPSIS
   
@@ -5284,7 +5043,7 @@ $fatpacked{"HTTP/Message.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HT
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   require HTTP::Headers;
   require Carp;
@@ -6165,7 +5924,7 @@ $fatpacked{"HTTP/Message.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HT
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 SYNOPSIS
   
@@ -7481,7 +7240,7 @@ $fatpacked{"HTTP/Request.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HT
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   use parent 'HTTP::Message';
   
@@ -7633,7 +7392,7 @@ $fatpacked{"HTTP/Request.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HT
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 SYNOPSIS
   
@@ -7836,7 +7595,7 @@ $fatpacked{"HTTP/Request/Common.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   our $DYNAMIC_FILE_UPLOAD ||= 0;  # make it defined (don't know why)
   our $READ_BUFFER_SIZE      = 8192;
@@ -8148,7 +7907,7 @@ $fatpacked{"HTTP/Request/Common.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 SYNOPSIS
   
@@ -8419,7 +8178,7 @@ $fatpacked{"HTTP/Response.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'H
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   use parent 'HTTP::Message';
   
@@ -8766,7 +8525,7 @@ $fatpacked{"HTTP/Response.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'H
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 SYNOPSIS
   
@@ -9474,12 +9233,12 @@ $fatpacked{"HTTP/Status.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTT
   use strict;
   use warnings;
   
-  our $VERSION = '6.44';
+  our $VERSION = '6.45';
   
   use Exporter 5.57 'import';
   
   our @EXPORT = qw(is_info is_success is_redirect is_error status_message);
-  our @EXPORT_OK = qw(is_client_error is_server_error is_cacheable_by_default status_constant_name);
+  our @EXPORT_OK = qw(is_client_error is_server_error is_cacheable_by_default status_constant_name status_codes);
   
   # Note also addition of mnemonics to @EXPORT below
   
@@ -9640,6 +9399,8 @@ $fatpacked{"HTTP/Status.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTT
                                               );
   }
   
+  sub status_codes         { %StatusCode; }
+  
   1;
   
   =pod
@@ -9652,7 +9413,7 @@ $fatpacked{"HTTP/Status.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTT
   
   =head1 VERSION
   
-  version 6.44
+  version 6.45
   
   =head1 SYNOPSIS
   
@@ -9821,6 +9582,12 @@ $fatpacked{"HTTP/Status.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTT
   
   This function is B<not> exported by default.
   
+  =item status_codes
+  
+  Returns a hash mapping numerical HTTP status code (e.g. 200) to text status messages (e.g. "OK")
+  
+  This function is B<not> exported by default.
+  
   =back
   
   =head1 SEE ALSO
@@ -9859,7 +9626,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   use warnings;
   # ABSTRACT: A small, simple, correct HTTP/1.1 client
   
-  our $VERSION = '0.084';
+  our $VERSION = '0.086';
   
   sub _croak { require Carp; Carp::croak(@_) }
   
@@ -10004,7 +9771,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
       my ($self) = @_;
       # Check if insecure default certificate verification behaviour has been
       # changed by the user by setting PERL_HTTP_TINY_SSL_INSECURE_BY_DEFAULT=1
-      return (($ENV{PERL_HTTP_TINY_INSECURE_BY_DEFAULT} || '') eq '1') ? 0 : 1;
+      return (($ENV{PERL_HTTP_TINY_SSL_INSECURE_BY_DEFAULT} || '') eq '1') ? 0 : 1;
   }
   
   sub _set_proxies {
@@ -11582,7 +11349,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =head1 VERSION
   
-  version 0.084
+  version 0.086
   
   =head1 SYNOPSIS
   
@@ -12435,7 +12202,7 @@ $fatpacked{"HTTP/Tiny/PreserveHostHeader.pm"} = '#line '.(1+__LINE__).' "'.__FIL
   
   =head1 NAME
   
-  HTTP::Tiny::PreserveHostHeader - preserve Host header on requests
+  HTTP::Tiny::PreserveHostHeader - Preserve Host header on requests
   
   =head1 SYNOPSIS
   
@@ -12482,7 +12249,7 @@ $fatpacked{"HTTP/Tiny/PreserveHostHeader.pm"} = '#line '.(1+__LINE__).' "'.__FIL
   use strict;
   use warnings;
   
-  our $VERSION = '0.0101';
+  our $VERSION = '0.0104';
   
   use parent qw(HTTP::Tiny);
   
@@ -13171,7 +12938,8 @@ $fatpacked{"IO/Socket/IP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'IO
   # $VERSION needs to be set before  use base 'IO::Socket'
   #  - https://rt.cpan.org/Ticket/Display.html?id=92107
   BEGIN {
-     our $VERSION = '0.41';
+     our $VERSION = '0.41_01';
+     $VERSION = eval $VERSION;
   }
   
   use base qw( IO::Socket );
@@ -13313,6 +13081,12 @@ $fatpacked{"IO/Socket/IP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'IO
            die "Cannot socket(PF_INET6) - $!";
   
         if( setsockopt $testsock, IPPROTO_IPV6, IPV6_V6ONLY, 0 ) {
+           if ($^O eq "dragonfly") {
+              # dragonflybsd 6.4 lies about successfully turning this off
+              if (getsockopt $testsock, IPPROTO_IPV6, IPV6_V6ONLY) {
+                 return $can_disable_v6only = 0;
+              }
+           }
            return $can_disable_v6only = 1;
         }
         elsif( $! == EINVAL || $! == EOPNOTSUPP ) {
@@ -15190,7 +14964,7 @@ $fatpacked{"POSIX/strftime/Compiler.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."
   use POSIX qw//;
   use base qw/Exporter/;
   
-  our $VERSION = "0.44";
+  our $VERSION = "0.46";
   our @EXPORT_OK = qw/strftime/;
   
   use constant {
@@ -15673,7 +15447,7 @@ $fatpacked{"Plack.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'PLACK';
   use strict;
   use warnings;
   use 5.008_001;
-  our $VERSION = '1.0050';
+  our $VERSION = '1.0051';
   
   1;
   __END__
@@ -16987,11 +16761,12 @@ $fatpacked{"Plack/App/Proxy/Backend/HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.
   
       # In app.psgi
       use Plack::Builder;
-      use Plack::App::Proxy::Anonymous;
   
       builder {
           enable "Proxy::Requests";
-          Plack::App::Proxy->new(backend => 'HTTP::Tiny')->to_app;
+          Plack::App::Proxy->new(backend => 'HTTP::Tiny', options => {
+              timeout => 15
+          })->to_app;
       };
   
   =for markdown ```
@@ -17005,6 +16780,19 @@ $fatpacked{"Plack/App/Proxy/Backend/HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.
   
   It is possible to bundle it e.g. by L<App::FatPacker>.
   
+  All I<options> from the L<Plack::App::Proxy> constructor goes to
+  L<HTTP::Tiny::PreserveHostHeader> constructor. This backend sets some default
+  options for L<HTTP::Tiny::PreserveHostHeader>:
+  
+  =for markdown ```perl
+  
+      max_redirect => 0,
+      http_proxy   => undef,
+      https_proxy  => undef,
+      all_proxy    => undef,
+  
+  =for markdown ```
+  
   =for readme stop
   
   =cut
@@ -17014,7 +16802,7 @@ $fatpacked{"Plack/App/Proxy/Backend/HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.
   use strict;
   use warnings;
   
-  our $VERSION = '0.0203';
+  our $VERSION = '0.0204';
   
   use parent qw(Plack::App::Proxy::Backend);
   
@@ -17030,6 +16818,9 @@ $fatpacked{"Plack/App/Proxy/Backend/HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.
   
           my $http = HTTP::Tiny::PreserveHostHeader->new(
               max_redirect => 0,
+              http_proxy   => undef,
+              https_proxy  => undef,
+              all_proxy    => undef,
               %{ $self->options || {} }
           );
   
@@ -17090,7 +16881,7 @@ $fatpacked{"Plack/App/Proxy/Backend/HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.
   =head1 SEE ALSO
   
   L<Plack>, L<Plack::App::Proxy>, L<Plack::Middleware::Proxy::Requests>,
-  L<HTTP::Tiny>.
+  L<HTTP::Tiny>, L<HTTP::Tiny::PreserveHostHeader>.
   
   =head1 BUGS
   
@@ -19937,7 +19728,7 @@ $fatpacked{"Plack/Handler/Starlight.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."
   use strict;
   use warnings;
   
-  our $VERSION = '0.0501';
+  our $VERSION = '0.0503';
   
   use base qw(Starlight::Server);
   
@@ -20126,7 +19917,7 @@ $fatpacked{"Plack/Handler/Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\
   use strict;
   use warnings;
   
-  our $VERSION = '0.0402';
+  our $VERSION = '0.0405';
   
   use base qw(Thrall::Server);
   
@@ -24591,7 +24382,8 @@ $fatpacked{"Plack/Middleware/StackTrace.pm"} = '#line '.(1+__LINE__).' "'.__FILE
           $trace = $caught_trace if $caught_trace;
       }
   
-      if ($trace && ($caught || ($self->force && ref $res eq 'ARRAY' && $res->[0] == 500)) ) {
+      # Use ref $trace to avoid overloaded as_string() for bool evaluation
+      if (ref $trace && ($caught || ($self->force && ref $res eq 'ARRAY' && $res->[0] == 500)) ) {
           my $text = $trace->as_string;
           my $html = $trace->as_html;
           $env->{'plack.stacktrace.text'} = $text;
@@ -24898,45 +24690,51 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
   
   =head1 SYNOPSIS
   
-    # In app.psgi
-    use Plack::Builder;
+  =for markdown ```perl
   
-    builder {
-        enable "TrafficLog", with_body => 1;
-    };
+      # In app.psgi
+      use Plack::Builder;
+  
+      builder {
+          enable "TrafficLog", with_body => 1;
+      };
+  
+  =for markdown ```
   
   =head1 DESCRIPTION
   
   This middleware logs the request and response messages with detailed
-  information about headers and body.
+  information about headers and the body.
   
   The example log:
   
-    [08/Aug/2012:16:59:47 +0200] [164836368] [127.0.0.1 -> 0:5000] [Request ]
-    |GET / HTTP/1.1|Connection: TE, close|Host: localhost:5000|TE: deflate,gzi
-    p;q=0.3|User-Agent: lwp-request/6.03 libwww-perl/6.03||
-    [08/Aug/2012:16:59:47 +0200] [164836368] [127.0.0.1 <- 0:5000] [Response]
-    |HTTP/1.0 200 OK|Content-Type: text/plain||Hello World
+  =for markdown ```console
   
-  This module works also with applications which have delayed response. In that
-  case each chunk is logged separately and shares the same unique ID number and
+      [08/Aug/2012:16:59:47 +0200] [164836368] [127.0.0.1 -> 0:5000] [Request ]
+      |GET / HTTP/1.1|Connection: TE, close|Host: localhost:5000|TE: deflate,gzi
+      p;q=0.3|User-Agent: lwp-request/6.03 libwww-perl/6.03||
+      [08/Aug/2012:16:59:47 +0200] [164836368] [127.0.0.1 <- 0:5000] [Response]
+      |HTTP/1.0 200 OK|Content-Type: text/plain||Hello World
+  
+  =for markdown ```
+  
+  This module works also with applications that have delayed response. In that
+  case, each chunk is logged separately and shares the same unique ID number and
   headers.
   
-  The body of request and response is not logged by default. For streaming
-  responses only first chunk is logged by default.
+  The body of the request and response is not logged by default. For streaming
+  responses, only the first chunk is logged by default.
   
   =for readme stop
   
   =cut
-  
   
   use 5.008;
   
   use strict;
   use warnings;
   
-  our $VERSION = '0.0401';
-  
+  our $VERSION = '0.0404';
   
   use parent 'Plack::Middleware';
   
@@ -24945,42 +24743,40 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
       _counter _call_id _strftime
   );
   
-  
   use Plack::Util;
   
   use Plack::Request;
   use Plack::Response;
   
-  use POSIX ();
+  use POSIX                     ();
   use POSIX::strftime::Compiler ();
-  use Scalar::Util ();
-  
+  use Scalar::Util              ();
   
   sub prepare_app {
       my ($self) = @_;
   
       # the default values
-      $self->with_request(Plack::Util::TRUE)     unless defined $self->with_request;
-      $self->with_response(Plack::Util::TRUE)    unless defined $self->with_response;
-      $self->with_date(Plack::Util::TRUE)        unless defined $self->with_date;
-      $self->with_body(Plack::Util::FALSE)       unless defined $self->with_body;
-      $self->with_all_chunks(Plack::Util::FALSE) unless defined $self->with_all_chunks;
+      $self->with_request(Plack::Util::TRUE)                 unless defined $self->with_request;
+      $self->with_response(Plack::Util::TRUE)                unless defined $self->with_response;
+      $self->with_date(Plack::Util::TRUE)                    unless defined $self->with_date;
+      $self->with_body(Plack::Util::FALSE)                   unless defined $self->with_body;
+      $self->with_all_chunks(Plack::Util::FALSE)             unless defined $self->with_all_chunks;
       $self->body_eol(defined $self->eol ? $self->eol : ' ') unless defined $self->body_eol;
-      $self->eol('|')         unless defined $self->eol;
+      $self->eol('|')                                        unless defined $self->eol;
   
       $self->_strftime(POSIX::strftime::Compiler->new('%d/%b/%Y:%H:%M:%S %z'));
   
       $self->_counter(0);
-  };
+  }
   
-  
-  sub _log_message {
+  sub _log_message {    ## no critic(Subroutines::ProhibitManyArgs)
       my ($self, $type, $env, $status, $headers, $body) = @_;
   
       my $logger = $self->logger || sub { $env->{'psgi.errors'}->print(@_) };
   
       my $server_addr = sprintf '%s:%s', $env->{SERVER_NAME}, $env->{SERVER_PORT};
-      my $remote_addr = defined $env->{REMOTE_PORT}
+      my $remote_addr
+          = defined $env->{REMOTE_PORT}
           ? sprintf '%s:%s', $env->{REMOTE_ADDR}, $env->{REMOTE_PORT}
           : $env->{REMOTE_ADDR};
   
@@ -24988,11 +24784,13 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
       my $body_eol = $self->body_eol;
       $body =~ s/\015?\012/$body_eol/gs if defined $body_eol;
   
-      my $date = $self->with_date
-          ? ('['. $self->_strftime->to_string(localtime) . '] ')
+      my $date
+          = $self->with_date
+          ? ('[' . $self->_strftime->to_string(localtime) . '] ')
           : '';
   
-      $logger->( sprintf "%s[%s] [%s %s %s] [%s] %s%s%s%s%s%s\n",
+      $logger->(
+          sprintf "%s[%s] [%s %s %s] [%s] %s%s%s%s%s%s\n",
           $date,
           $self->_call_id,
   
@@ -25009,8 +24807,7 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
           $eol,
           $body,
       );
-  };
-  
+  }
   
   sub _log_request {
       my ($self, $env) = @_;
@@ -25022,8 +24819,7 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
       my $body = $self->with_body ? $req->content : '';
   
       $self->_log_message('Request ', $env, $status, $headers, $body);
-  };
-  
+  }
   
   sub _log_response {
       my ($self, $env, $ret) = @_;
@@ -25043,16 +24839,19 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
       }
   
       $self->_log_message('Response', $env, $status, $headers, $body);
-  };
-  
+  }
   
   sub call {
       my ($self, $env) = @_;
   
-      $self->_call_id(sprintf '%015d',
-          time % 2**16 * 2**32 +
-          (Scalar::Util::looks_like_number $env->{REMOTE_PORT} ? $env->{REMOTE_PORT} : int rand 2**16) % 2**16 * 2**16 +
-          $self->_counter % 2**16);
+      $self->_call_id(
+          sprintf '%015s',
+          time % 2**16
+              * 2**32
+              + (Scalar::Util::looks_like_number $env->{REMOTE_PORT} ? $env->{REMOTE_PORT} : int rand 2**16) % 2**16
+              * 2**16
+              + $self->_counter % 2**16
+      );
       $self->_counter($self->_counter + 1);
   
       # Preprocessing
@@ -25062,23 +24861,28 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
       my $res = $self->app->($env);
   
       # Postprocessing
-      return $self->with_response ? $self->response_cb($res, sub {
-          my ($ret) = @_;
-          my $seen;
-          return sub {
-              my ($chunk) = @_;
-              return if $seen and not defined $chunk;
-              return $chunk if $seen and not $self->with_all_chunks;
-              $self->_log_response($env, [ $ret->[0], $ret->[1], [$chunk] ]);
-              $seen = Plack::Util::TRUE;
-              return $chunk;
-          };
-      }) : $res;
-  };
-  
+      return $self->with_response
+          ? $self->response_cb(
+          $res,
+          sub {
+              my ($ret) = @_;
+              my $seen;
+              return sub {
+                  my ($chunk) = @_;
+                  return        if $seen and not defined $chunk;
+                  return $chunk if $seen and not $self->with_all_chunks;
+                  $self->_log_response($env, [$ret->[0], $ret->[1], [$chunk]]);
+                  $seen = Plack::Util::TRUE;
+                  return $chunk;
+              };
+          }
+          )
+          : $res;
+  }
   
   1;
   
+  __END__
   
   =head1 CONFIGURATION
   
@@ -25086,39 +24890,47 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
   
   =item logger
   
-    # traffic.l4p
-    log4perl.logger.traffic = DEBUG, LogfileTraffic
-    log4perl.appender.LogfileTraffic = Log::Log4perl::Appender::File
-    log4perl.appender.LogfileTraffic.filename = traffic.log
-    log4perl.appender.LogfileTraffic.layout = PatternLayout
-    log4perl.appender.LogfileTraffic.layout.ConversionPattern = %m{chomp}%n
-  
-    # app.psgi
-    use Log::Log4perl qw(:levels get_logger);
-    Log::Log4perl->init('traffic.l4p');
-    my $logger = get_logger('traffic');
-  
-    enable "Plack::Middleware::TrafficLog",
-        logger => sub { $logger->log($INFO, join '', @_) };
-  
   Sets a callback to print log message to. It prints to C<psgi.errors> output
   stream by default.
   
+  =for markdown ```ini
+  
+      # traffic.l4p
+      log4perl.logger.traffic = DEBUG, LogfileTraffic
+      log4perl.appender.LogfileTraffic = Log::Log4perl::Appender::File
+      log4perl.appender.LogfileTraffic.filename = traffic.log
+      log4perl.appender.LogfileTraffic.layout = PatternLayout
+      log4perl.appender.LogfileTraffic.layout.ConversionPattern = %m{chomp}%n
+  
+  =for markdown ```
+  
+  =for markdown ```perl
+  
+      # app.psgi
+      use Log::Log4perl qw(:levels get_logger);
+      Log::Log4perl->init('traffic.l4p');
+      my $logger = get_logger('traffic');
+  
+      enable "Plack::Middleware::TrafficLog",
+          logger => sub { $logger->log($INFO, join '', @_) };
+  
+  =for markdown ```
+  
   =item with_request
   
-  The false value disables logging of request message.
+  The false value disables logging of the request message.
   
   =item with_response
   
-  The false value disables logging of response message.
+  The false value disables logging of the response message.
   
   =item with_date
   
-  The false value disables logging of current date.
+  The false value disables logging of the current date.
   
   =item with_body
   
-  The true value enables logging of message's body.
+  The true value enables logging of the message's body.
   
   =item with_all_chunks
   
@@ -25126,8 +24938,8 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
   
   =item eol
   
-  Sets the line separator for message's headers and body. The default value is
-  the pipe character C<|>.
+  Sets the line separator for the message's headers and the body. The default
+  value is the pipe character C<|>.
   
   =item body_eol
   
@@ -25144,9 +24956,9 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
   
   =head1 BUGS
   
-  This module has unstable API and it can be changed in future.
+  This module has an unstable API and it can be changed in the future.
   
-  The log file can contain the binary data if the PSGI server provides binary
+  The log file can contain binary data if the PSGI server provides binary
   files.
   
   If you find the bug or want to implement new features, please report it at
@@ -25161,7 +24973,7 @@ $fatpacked{"Plack/Middleware/TrafficLog.pm"} = '#line '.(1+__LINE__).' "'.__FILE
   
   =head1 LICENSE
   
-  Copyright (c) 2012, 2014-2015 Piotr Roszatycki <dexter@cpan.org>.
+  Copyright (c) 2012, 2014-2015, 2023 Piotr Roszatycki <dexter@cpan.org>.
   
   This is free software; you can redistribute it and/or modify it under
   the same terms as perl itself.
@@ -25354,7 +25166,7 @@ $fatpacked{"Plack/Request.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'P
   use strict;
   use warnings;
   use 5.008_001;
-  our $VERSION = '1.0050';
+  our $VERSION = '1.0051';
   
   use HTTP::Headers::Fast;
   use Carp ();
@@ -25447,7 +25259,7 @@ $fatpacked{"Plack/Request.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'P
                   (my $field = $_) =~ s/^HTTPS?_//;
                   ( lc($field) => $env->{$_} );
               }
-                  grep { /^(?:HTTP|CONTENT)/i } keys %$env
+                  grep { /^(?:HTTP|CONTENT)_/ } keys %$env
               );
       }
       $self->{headers};
@@ -26124,7 +25936,7 @@ $fatpacked{"Plack/Response.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'
   package Plack::Response;
   use strict;
   use warnings;
-  our $VERSION = '1.0050';
+  our $VERSION = '1.0051';
   
   use Plack::Util::Accessor qw(body status);
   use Carp ();
@@ -28616,7 +28428,7 @@ $fatpacked{"Starlight.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'STARL
   use strict;
   use warnings;
   
-  our $VERSION = '0.0501';
+  our $VERSION = '0.0503';
   
   1;
   
@@ -28687,7 +28499,7 @@ $fatpacked{"Starlight/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<
   use strict;
   use warnings;
   
-  our $VERSION = '0.0501';
+  our $VERSION = '0.0503';
   
   use Config;
   
@@ -29789,7 +29601,7 @@ $fatpacked{"Thrall.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'THRALL';
   use strict;
   use warnings;
   
-  our $VERSION = '0.0402';
+  our $VERSION = '0.0405';
   
   1;
   
@@ -29856,7 +29668,7 @@ $fatpacked{"Thrall/Server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'T
   use strict;
   use warnings;
   
-  our $VERSION = '0.0402';
+  our $VERSION = '0.0405';
   
   use Config;
   
@@ -30715,7 +30527,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   use Carp ();
   use Exporter;
   
-  our $VERSION = '1.35';
+  our $VERSION = '1.30';
   
   use parent 'Exporter';
   
@@ -30768,18 +30580,6 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   else {
       # recent localtime()'s limit is the year 2**31
       $MaxDay = 365 * ( 2**31 );
-  
-      # On (some?) 32-bit platforms this overflows and we end up with a negative
-      # $MaxDay, which totally breaks this module. This is the old calculation
-      # we used from the days before Perl always had 64-bit time_t.
-      if ( $MaxDay < 0 ) {
-          require Config;
-          ## no critic (Variables::ProhibitPackageVars)
-          my $max_int
-              = ( ( 1 << ( 8 * $Config::Config{intsize} - 2 ) ) - 1 ) * 2 + 1;
-          $MaxDay
-              = int( ( $max_int - ( SECS_PER_DAY / 2 ) ) / SECS_PER_DAY ) - 1;
-      }
   }
   
   # Determine the EPOC day for this machine
@@ -30802,7 +30602,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
       $Epoc = _daygm( gmtime(0) );
   }
   
-  %Cheat = ();    # clear the cache as epoc has changed
+  %Cheat = ();         # clear the cache as epoc has changed
   
   sub _daygm {
   
@@ -30817,8 +30617,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
                   + int( $year / 4 )
                       - int( $year / 100 )
                       + int( $year / 400 )
-                      + int( ( ( $month * 306 ) + 5 ) / 10 ) )
-                  - $Epoc;
+                      + int( ( ( $month * 306 ) + 5 ) / 10 ) ) - $Epoc;
           }
       );
   }
@@ -30834,8 +30633,6 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   sub timegm {
       my ( $sec, $min, $hour, $mday, $month, $year ) = @_;
-      my $subsec = $sec - int($sec);
-      $sec = int($sec);
   
       if ( $Options{no_year_munging} ) {
           $year -= 1900;
@@ -30870,8 +30667,9 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
       my $days = _daygm( undef, undef, undef, $mday, $month, $year );
   
-      if ( abs($days) > $MaxDay && !$Options{no_range_check} ) {
-          my $msg = "Day too big - abs($days) > $MaxDay\n";
+      unless ( $Options{no_range_check} or abs($days) < $MaxDay ) {
+          my $msg = q{};
+          $msg .= "Day too big - $days > $MaxDay\n" if $days > $MaxDay;
   
           $year += 1900;
           $msg
@@ -30880,16 +30678,11 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
           Carp::croak($msg);
       }
   
-      # Adding in the $subsec value last seems to prevent floating point errors
-      # from creeping in.
-      return (
-          (
-                    $sec + $SecOff
-                  + ( SECS_PER_MINUTE * $min )
-                  + ( SECS_PER_HOUR * $hour )
-                  + ( SECS_PER_DAY * $days )
-          ) + $subsec
-      );
+      return
+            $sec + $SecOff
+          + ( SECS_PER_MINUTE * $min )
+          + ( SECS_PER_HOUR * $hour )
+          + ( SECS_PER_DAY * $days );
   }
   
   sub _is_leap_year {
@@ -30916,16 +30709,11 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   }
   
   sub timelocal {
-      my $sec    = shift;
-      my $subsec = $sec - int($sec);
-      $sec = int($sec);
-      unshift @_, $sec;
-  
       my $ref_t         = &timegm;
       my $loc_for_ref_t = _timegm( localtime($ref_t) );
   
       my $zone_off = $loc_for_ref_t - $ref_t
-          or return $loc_for_ref_t + $subsec;
+          or return $loc_for_ref_t;
   
       # Adjust for timezone
       my $loc_t = $ref_t - $zone_off;
@@ -30941,20 +30729,20 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
           && ( ( $ref_t - SECS_PER_HOUR )
               - _timegm( localtime( $loc_t - SECS_PER_HOUR ) ) < 0 )
       ) {
-          return ( $loc_t - SECS_PER_HOUR ) + $subsec;
+          return $loc_t - SECS_PER_HOUR;
       }
   
       # Adjust for DST change
       $loc_t += $dst_off;
   
-      return $loc_t + $subsec if $dst_off > 0;
+      return $loc_t if $dst_off > 0;
   
       # If the original date was a non-existent gap in a forward DST jump, we
       # should now have the wrong answer - undo the DST adjustment
       my ( $s, $m, $h ) = localtime($loc_t);
       $loc_t -= $dst_off if $s != $_[0] || $m != $_[1] || $h != $_[2];
   
-      return $loc_t + $subsec;
+      return $loc_t;
   }
   
   sub timelocal_nocheck {
@@ -30988,7 +30776,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head1 VERSION
   
-  version 1.35
+  version 1.30
   
   =head1 SYNOPSIS
   
@@ -31015,8 +30803,6 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head2 C<timelocal_posix()> and C<timegm_posix()>
   
-  I<Since version 1.30.>
-  
   These functions are the exact inverse of Perl's built-in C<localtime> and
   C<gmtime> functions. That means that calling C<< timelocal_posix(
   localtime($value) ) >> will always give you the same C<$value> you started
@@ -31029,9 +30815,9 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   These functions expect the year value to be the number of years since 1900,
   which is what the C<localtime()> and C<gmtime()> built-ins returns.
   
-  They perform range checking by default on the input C<$sec>, C<$min>, C<$hour>,
-  C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>) if given a
-  value outside the allowed ranges.
+  They perform range checking by default on the input C<$sec>, C<$min>,
+  C<$hour>, C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>)
+  if given a value outside the allowed ranges.
   
   While it would be nice to make this the default behavior, that would almost
   certainly break a lot of code, so you must explicitly import these functions
@@ -31043,8 +30829,6 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head2 C<timelocal_modern()> and C<timegm_modern()>
   
-  I<Since version 1.27.>
-  
   When C<Time::Local> was first written, it was a common practice to represent
   years as a two-digit value like C<99> for C<1999> or C<1> for C<2001>. This
   caused all sorts of problems (google "Y2K problem" if you're very young) and
@@ -31054,26 +30838,26 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   calculation when given a year value less than 1000. This leads to surprising
   results in many cases. See L</Year Value Interpretation> for details.
   
-  The C<time*_modern()> functions do not do this year munging and simply take the
-  year value as provided.
+  The C<time*_modern()> functions do not do this year munging and simply take
+  the year value as provided.
   
-  They perform range checking by default on the input C<$sec>, C<$min>, C<$hour>,
-  C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>) if given a
-  value outside the allowed ranges.
+  They perform range checking by default on the input C<$sec>, C<$min>,
+  C<$hour>, C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>)
+  if given a value outside the allowed ranges.
   
   =head2 C<timelocal()> and C<timegm()>
   
   This module exports two functions by default, C<timelocal()> and C<timegm()>.
   
-  They perform range checking by default on the input C<$sec>, C<$min>, C<$hour>,
-  C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>) if given a
-  value outside the allowed ranges.
+  They perform range checking by default on the input C<$sec>, C<$min>,
+  C<$hour>, C<$mday>, and C<$mon> values and will croak (using C<Carp::croak()>)
+  if given a value outside the allowed ranges.
   
-  B<Warning: The year value interpretation that these functions and their nocheck
-  variants use will almost certainly lead to bugs in your code, if not now, then
-  in the future. You are strongly discouraged from using these in new code, and
-  you should convert old code to using either the C<*_posix> or C<*_modern>
-  functions if possible.>
+  B<Warning: The year value interpretation that these functions and their
+  nocheck variants use will almost certainly lead to bugs in your code, if not
+  now, then in the future. You are strongly discouraged from using these in new
+  code, and you should convert old code to using either the C<*_posix> or
+  C<*_modern> functions if possible.>
   
   =head2 C<timelocal_nocheck()> and C<timegm_nocheck()>
   
@@ -31081,8 +30865,8 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   variants, C<timelocal_nocheck()> and C<timegm_nocheck()>. These variants must
   be explicitly imported.
   
-  If you supply data which is not valid (month 27, second 1,000) the results will
-  be unpredictable (so don't do that).
+  If you supply data which is not valid (month 27, second 1,000) the results
+  will be unpredictable (so don't do that).
   
   Note that my benchmarks show that this is just a 3% speed increase over the
   checked versions, so unless calling C<Time::Local> is the hottest spot in your
@@ -31096,16 +30880,17 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   Strictly speaking, the year should be specified in a form consistent with
   C<localtime()>, i.e. the offset from 1900. In order to make the interpretation
-  of the year easier for humans, however, who are more accustomed to seeing years
-  as two-digit or four-digit values, the following conventions are followed:
+  of the year easier for humans, however, who are more accustomed to seeing
+  years as two-digit or four-digit values, the following conventions are
+  followed:
   
   =over 4
   
   =item *
   
   Years greater than 999 are interpreted as being the actual year, rather than
-  the offset from 1900. Thus, 1964 would indicate the year Martin Luther King won
-  the Nobel prize, not the year 3864.
+  the offset from 1900. Thus, 1964 would indicate the year Martin Luther King
+  won the Nobel prize, not the year 3864.
   
   =item *
   
@@ -31116,11 +30901,11 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   =item *
   
   Years in the range 0..99 are interpreted as shorthand for years in the rolling
-  "current century," defined as 50 years on either side of the current year.
-  Thus, today, in 1999, 0 would refer to 2000, and 45 to 2045, but 55 would refer
-  to 1955. Twenty years from now, 55 would instead refer to 2055. This is messy,
-  but matches the way people currently think about two digit dates. Whenever
-  possible, use an absolute four digit year instead.
+  "current century," defined as 50 years on either side of the current
+  year. Thus, today, in 1999, 0 would refer to 2000, and 45 to 2045, but 55
+  would refer to 1955. Twenty years from now, 55 would instead refer to
+  2055. This is messy, but matches the way people currently think about two
+  digit dates. Whenever possible, use an absolute four digit year instead.
   
   =back
   
@@ -31151,15 +30936,15 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   "Europe/Paris" time zone, the local time of 2001-10-28 02:30:00 can represent
   either 2001-10-28 00:30:00 GMT, B<or> 2001-10-28 01:30:00 GMT.
   
-  When given an ambiguous local time, the timelocal() function will always return
-  the epoch for the I<earlier> of the two possible GMT times.
+  When given an ambiguous local time, the timelocal() function will always
+  return the epoch for the I<earlier> of the two possible GMT times.
   
   =head2 Non-Existent Local Times (DST)
   
-  When a DST change causes a locale clock to skip one hour forward, there will be
-  an hour's worth of local times that don't exist. Again, for the "Europe/Paris"
-  time zone, the local clock jumped from 2001-03-25 01:59:59 to 2001-03-25
-  03:00:00.
+  When a DST change causes a locale clock to skip one hour forward, there will
+  be an hour's worth of local times that don't exist. Again, for the
+  "Europe/Paris" time zone, the local clock jumped from 2001-03-25 01:59:59 to
+  2001-03-25 03:00:00.
   
   If the C<timelocal()> function is given a non-existent local time, it will
   simply return an epoch value for the time one hour later.
@@ -31182,20 +30967,21 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   C<localtime()> and C<gmtime()>. We manage this by caching the start times of
   any months we've seen before. If we know the start time of the month, we can
   always calculate any time within the month.  The start times are calculated
-  using a mathematical formula. Unlike other algorithms that do multiple calls to
-  C<gmtime()>.
+  using a mathematical formula. Unlike other algorithms that do multiple calls
+  to C<gmtime()>.
   
-  The C<timelocal()> function is implemented using the same cache. We just assume
-  that we're translating a GMT time, and then fudge it when we're done for the
-  timezone and daylight savings arguments. Note that the timezone is evaluated
-  for each date because countries occasionally change their official timezones.
-  Assuming that C<localtime()> corrects for these changes, this routine will also
-  be correct.
+  The C<timelocal()> function is implemented using the same cache. We just
+  assume that we're translating a GMT time, and then fudge it when we're done
+  for the timezone and daylight savings arguments. Note that the timezone is
+  evaluated for each date because countries occasionally change their official
+  timezones. Assuming that C<localtime()> corrects for these changes, this
+  routine will also be correct.
   
   =head1 AUTHORS EMERITUS
   
-  This module is based on a Perl 4 library, timelocal.pl, that was included with
-  Perl 4.036, and was most likely written by Tom Christiansen.
+  This module is based on a Perl 4 library, timelocal.pl, that was
+  included with Perl 4.036, and was most likely written by Tom
+  Christiansen.
   
   The current version was written by Graham Barr.
   
@@ -31208,6 +30994,8 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   There is a mailing list available for users of this distribution,
   L<mailto:datetime@perl.org>.
   
+  I am also usually active on IRC as 'autarch' on C<irc://irc.perl.org>.
+  
   =head1 SOURCE
   
   The source code repository for Time-Local can be found at L<https://github.com/houseabsolute/Time-Local>.
@@ -31218,7 +31006,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head1 CONTRIBUTORS
   
-  =for stopwords Florian Ragwitz Gregory Oschwald J. Nick Koston Tom Wyant Unknown
+  =for stopwords Florian Ragwitz J. Nick Koston Unknown
   
   =over 4
   
@@ -31228,15 +31016,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =item *
   
-  Gregory Oschwald <oschwald@gmail.com>
-  
-  =item *
-  
   J. Nick Koston <nick@cpanel.net>
-  
-  =item *
-  
-  Tom Wyant <wyant@cpan.org>
   
   =item *
   
@@ -31246,7 +31026,7 @@ $fatpacked{"Time/Local.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TIME
   
   =head1 COPYRIGHT AND LICENSE
   
-  This software is copyright (c) 1997 - 2023 by Graham Barr & Dave Rolsky.
+  This software is copyright (c) 1997 - 2020 by Graham Barr & Dave Rolsky.
   
   This is free software; you can redistribute it and/or modify it under
   the same terms as the Perl 5 programming language system itself.
@@ -32086,7 +31866,7 @@ $fatpacked{"URI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI';
   use strict;
   use warnings;
   
-  our $VERSION = '5.19';
+  our $VERSION = '5.21';
   
   # 1=version 5.10 and earlier; 0=version 5.11 and later
   use constant HAS_RESERVED_SQUARE_BRACKETS => $ENV{URI_HAS_RESERVED_SQUARE_BRACKETS} ? 1 : 0;
@@ -33077,6 +32857,21 @@ $fatpacked{"URI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI';
   connections.  Its syntax is the same as http, but the default
   port is different.
   
+  =item B<icap>:
+  
+  The I<icap> URI scheme is specified in L<RFC 3507|http://tools.ietf.org/html/rfc3507>.
+  The scheme is used to reference resources hosted by ICAP servers.
+  
+  C<URI> objects belonging to the icap scheme support the common,
+  generic and server methods.
+  
+  =item B<icaps>:
+  
+  The I<icaps> URI scheme is specified in L<RFC 3507|http://tools.ietf.org/html/rfc3507> as well.
+  The scheme is used to reference ICAP servers through SSL
+  connections.  Its syntax is the same as icap, including the same
+  default port.
+  
   =item B<ldap>:
   
   The I<ldap> URI scheme is specified in RFC 2255.  LDAP is the
@@ -33559,7 +33354,7 @@ $fatpacked{"URI/Escape.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_
   our %escapes;
   our @EXPORT = qw(uri_escape uri_unescape uri_escape_utf8);
   our @EXPORT_OK = qw(%escapes);
-  our $VERSION = '5.19';
+  our $VERSION = '5.21';
   
   use Carp ();
   
@@ -33658,6 +33453,4358 @@ $fatpacked{"URI/Escape.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_
   
   1;
 URI_ESCAPE
+
+$fatpacked{"URI/Heuristic.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_HEURISTIC';
+  package URI::Heuristic;
+  
+  =head1 NAME
+  
+  URI::Heuristic - Expand URI using heuristics
+  
+  =head1 SYNOPSIS
+  
+   use URI::Heuristic qw(uf_uristr);
+   $u = uf_uristr("example");          # http://www.example.com
+   $u = uf_uristr("www.sol.no/sol");   # http://www.sol.no/sol
+   $u = uf_uristr("aas");              # http://www.aas.no
+   $u = uf_uristr("ftp.funet.fi");     # ftp://ftp.funet.fi
+   $u = uf_uristr("/etc/passwd");      # file:/etc/passwd
+  
+  =head1 DESCRIPTION
+  
+  This module provides functions that expand strings into real absolute
+  URIs using some built-in heuristics.  Strings that already represent
+  absolute URIs (i.e. that start with a C<scheme:> part) are never modified
+  and are returned unchanged.  The main use of these functions is to
+  allow abbreviated URIs similar to what many web browsers allow for URIs
+  typed in by the user.
+  
+  The following functions are provided:
+  
+  =over 4
+  
+  =item uf_uristr($str)
+  
+  Tries to make the argument string
+  into a proper absolute URI string.  The "uf_" prefix stands for "User 
+  Friendly".  Under MacOS, it assumes that any string with a common URL 
+  scheme (http, ftp, etc.) is a URL rather than a local path.  So don't name 
+  your volumes after common URL schemes and expect uf_uristr() to construct 
+  valid file: URL's on those volumes for you, because it won't.
+  
+  =item uf_uri($str)
+  
+  Works the same way as uf_uristr() but
+  returns a C<URI> object.
+  
+  =back
+  
+  =head1 ENVIRONMENT
+  
+  If the hostname portion of a URI does not contain any dots, then
+  certain qualified guesses are made.  These guesses are governed by
+  the following environment variables:
+  
+  =over 10
+  
+  =item COUNTRY
+  
+  The two-letter country code (ISO 3166) for your location.  If
+  the domain name of your host ends with two letters, then it is taken
+  to be the default country. See also L<Locale::Country>.
+  
+  =item HTTP_ACCEPT_LANGUAGE, LC_ALL, LANG
+  
+  If COUNTRY is not set, these standard environment variables are
+  examined and country (not language) information possibly found in them
+  is used as the default country.
+  
+  =item URL_GUESS_PATTERN
+  
+  Contains a space-separated list of URL patterns to try.  The string
+  "ACME" is for some reason used as a placeholder for the host name in
+  the URL provided.  Example:
+  
+   URL_GUESS_PATTERN="www.ACME.no www.ACME.se www.ACME.com"
+   export URL_GUESS_PATTERN
+  
+  Specifying URL_GUESS_PATTERN disables any guessing rules based on
+  country.  An empty URL_GUESS_PATTERN disables any guessing that
+  involves host name lookups.
+  
+  =back
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1997-1998, Gisle Aas
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+  
+  use strict;
+  use warnings;
+  
+  use Exporter 5.57 'import';
+  our @EXPORT_OK = qw(uf_uri uf_uristr uf_url uf_urlstr);
+  our $VERSION = '5.21';
+  
+  our ($MY_COUNTRY, $DEBUG);
+  
+  sub MY_COUNTRY() {
+      for ($MY_COUNTRY) {
+  	return $_ if defined;
+  
+  	# First try the environment.
+  	$_ = $ENV{COUNTRY};
+  	return $_ if defined;
+  
+  	# Try the country part of LC_ALL and LANG from environment
+  	my @srcs = ($ENV{LC_ALL}, $ENV{LANG});
+  	# ...and HTTP_ACCEPT_LANGUAGE before those if present
+  	if (my $httplang = $ENV{HTTP_ACCEPT_LANGUAGE}) {
+  	    # TODO: q-value processing/ordering
+  	    for $httplang (split(/\s*,\s*/, $httplang)) {
+  		if ($httplang =~ /^\s*([a-zA-Z]+)[_-]([a-zA-Z]{2})\s*$/) {
+  		    unshift(@srcs, "${1}_${2}");
+  		    last;
+  		}
+  	    }
+  	}
+  	for (@srcs) {
+  	    next unless defined;
+  	    return lc($1) if /^[a-zA-Z]+_([a-zA-Z]{2})(?:[.@]|$)/;
+  	}
+  
+  	# Last bit of domain name.  This may access the network.
+  	require Net::Domain;
+  	my $fqdn = Net::Domain::hostfqdn();
+  	$_ = lc($1) if $fqdn =~ /\.([a-zA-Z]{2})$/;
+  	return $_ if defined;
+  
+  	# Give up.  Defined but false.
+  	return ($_ = 0);
+      }
+  }
+  
+  our %LOCAL_GUESSING =
+  (
+   'us' => [qw(www.ACME.gov www.ACME.mil)],
+   'gb' => [qw(www.ACME.co.uk www.ACME.org.uk www.ACME.ac.uk)],
+   'au' => [qw(www.ACME.com.au www.ACME.org.au www.ACME.edu.au)],
+   'il' => [qw(www.ACME.co.il www.ACME.org.il www.ACME.net.il)],
+   # send corrections and new entries to <gisle@aas.no>
+  );
+  # Backwards compatibility; uk != United Kingdom in ISO 3166
+  $LOCAL_GUESSING{uk} = $LOCAL_GUESSING{gb};
+  
+  
+  sub uf_uristr ($)
+  {
+      local($_) = @_;
+      print STDERR "uf_uristr: resolving $_\n" if $DEBUG;
+      return unless defined;
+  
+      s/^\s+//;
+      s/\s+$//;
+  
+      if (/^(www|web|home)[a-z0-9-]*(?:\.|$)/i) {
+  	$_ = "http://$_";
+  
+      } elsif (/^(ftp|gopher|news|wais|https|http)[a-z0-9-]*(?:\.|$)/i) {
+  	$_ = lc($1) . "://$_";
+  
+      } elsif ($^O ne "MacOS" && 
+  	    (m,^/,      ||          # absolute file name
+  	     m,^\.\.?/, ||          # relative file name
+  	     m,^[a-zA-Z]:[/\\],)    # dosish file name
+  	    )
+      {
+  	$_ = "file:$_";
+  
+      } elsif ($^O eq "MacOS" && m/:/) {
+          # potential MacOS file name
+  	unless (m/^(ftp|gopher|news|wais|http|https|mailto):/) {
+  	    require URI::file;
+  	    my $a = URI::file->new($_)->as_string;
+  	    $_ = ($a =~ m/^file:/) ? $a : "file:$a";
+  	}
+      } elsif (/^\w+([\.\-]\w+)*\@(\w+\.)+\w{2,3}$/) {
+  	$_ = "mailto:$_";
+  
+      } elsif (!/^[a-zA-Z][a-zA-Z0-9.+\-]*:/) {      # no scheme specified
+  	if (s/^([-\w]+(?:\.[-\w]+)*)([\/:\?\#]|$)/$2/) {
+  	    my $host = $1;
+  
+  	    my $scheme = "http";
+  	    if (/^:(\d+)\b/) {
+  		# Some more or less well known ports
+  		if ($1 =~ /^[56789]?443$/) {
+  		    $scheme = "https";
+  		} elsif ($1 eq "21") {
+  		    $scheme = "ftp";
+  		}
+  	    }
+  
+  	    if ($host !~ /\./ && $host ne "localhost") {
+  		my @guess;
+  		if (exists $ENV{URL_GUESS_PATTERN}) {
+  		    @guess = map { s/\bACME\b/$host/; $_ }
+  		             split(' ', $ENV{URL_GUESS_PATTERN});
+  		} else {
+  		    if (MY_COUNTRY()) {
+  			my $special = $LOCAL_GUESSING{MY_COUNTRY()};
+  			if ($special) {
+  			    my @special = @$special;
+  			    push(@guess, map { s/\bACME\b/$host/; $_ }
+                                                 @special);
+  			} else {
+  			    push(@guess, "www.$host." . MY_COUNTRY());
+  			}
+  		    }
+  		    push(@guess, map "www.$host.$_",
+  			             "com", "org", "net", "edu", "int");
+  		}
+  
+  
+  		my $guess;
+  		for $guess (@guess) {
+  		    print STDERR "uf_uristr: gethostbyname('$guess.')..."
+  		      if $DEBUG;
+  		    if (gethostbyname("$guess.")) {
+  			print STDERR "yes\n" if $DEBUG;
+  			$host = $guess;
+  			last;
+  		    }
+  		    print STDERR "no\n" if $DEBUG;
+  		}
+  	    }
+  	    $_ = "$scheme://$host$_";
+  
+  	} else {
+  	    # pure junk, just return it unchanged...
+  
+  	}
+      }
+      print STDERR "uf_uristr: ==> $_\n" if $DEBUG;
+  
+      $_;
+  }
+  
+  sub uf_uri ($)
+  {
+      require URI;
+      URI->new(uf_uristr($_[0]));
+  }
+  
+  # legacy
+  *uf_urlstr = \*uf_uristr;
+  
+  sub uf_url ($)
+  {
+      require URI::URL;
+      URI::URL->new(uf_uristr($_[0]));
+  }
+  
+  1;
+URI_HEURISTIC
+
+$fatpacked{"URI/IRI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_IRI';
+  package URI::IRI;
+  
+  # Experimental
+  
+  use strict;
+  use warnings;
+  use URI ();
+  
+  use overload '""' => sub { shift->as_string };
+  
+  our $VERSION = '5.21';
+  
+  sub new {
+      my($class, $uri, $scheme) = @_;
+      utf8::upgrade($uri);
+      return bless {
+  	uri => URI->new($uri, $scheme),
+      }, $class;
+  }
+  
+  sub clone {
+      my $self = shift;
+      return bless {
+  	uri => $self->{uri}->clone,
+      }, ref($self);
+  }
+  
+  sub as_string {
+      my $self = shift;
+      return $self->{uri}->as_iri;
+  }
+  
+  our $AUTOLOAD;
+  sub AUTOLOAD
+  {
+      my $method = substr($AUTOLOAD, rindex($AUTOLOAD, '::')+2);
+  
+      # We create the function here so that it will not need to be
+      # autoloaded the next time.
+      no strict 'refs';
+      *$method = sub { shift->{uri}->$method(@_) };
+      goto &$method;
+  }
+  
+  sub DESTROY {}   # avoid AUTOLOADing it
+  
+  1;
+URI_IRI
+
+$fatpacked{"URI/QueryParam.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_QUERYPARAM';
+  package URI::QueryParam;
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::QueryParam - Additional query methods for URIs
+  
+  =head1 SYNOPSIS
+  
+    use URI;
+  
+  =head1 DESCRIPTION
+  
+  C<URI::QueryParam> used to provide the
+  L<< query_form_hash|URI/$hashref = $u->query_form_hash >>,
+  L<< query_param|URI/@keys = $u->query_param >>
+  L<< query_param_append|URI/$u->query_param_append($key, $value,...) >>, and
+  L<< query_param_delete|URI/ @values = $u->query_param_delete($key) >> methods
+  on L<URI> objects. These methods have been merged into L<URI> itself, so this
+  module is now a no-op.
+  
+  =head1 COPYRIGHT
+  
+  Copyright 2002 Gisle Aas.
+  
+  =cut
+URI_QUERYPARAM
+
+$fatpacked{"URI/Split.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SPLIT';
+  package URI::Split;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use Exporter 5.57 'import';
+  our @EXPORT_OK = qw(uri_split uri_join);
+  
+  use URI::Escape ();
+  
+  sub uri_split {
+       return $_[0] =~ m,(?:([^:/?#]+):)?(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?,;
+  }
+  
+  sub uri_join {
+      my($scheme, $auth, $path, $query, $frag) = @_;
+      my $uri = defined($scheme) ? "$scheme:" : "";
+      $path = "" unless defined $path;
+      if (defined $auth) {
+  	$auth =~ s,([/?\#]), URI::Escape::escape_char($1),eg;
+  	$uri .= "//$auth";
+  	$path = "/$path" if length($path) && $path !~ m,^/,;
+      }
+      elsif ($path =~ m,^//,) {
+  	$uri .= "//";  # XXX force empty auth
+      }
+      unless (length $uri) {
+  	$path =~ s,(:), URI::Escape::escape_char($1),e while $path =~ m,^[^:/?\#]+:,;
+      }
+      $path =~ s,([?\#]), URI::Escape::escape_char($1),eg;
+      $uri .= $path;
+      if (defined $query) {
+  	$query =~ s,(\#), URI::Escape::escape_char($1),eg;
+  	$uri .= "?$query";
+      }
+      $uri .= "#$frag" if defined $frag;
+      $uri;
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::Split - Parse and compose URI strings
+  
+  =head1 SYNOPSIS
+  
+   use URI::Split qw(uri_split uri_join);
+   ($scheme, $auth, $path, $query, $frag) = uri_split($uri);
+   $uri = uri_join($scheme, $auth, $path, $query, $frag);
+  
+  =head1 DESCRIPTION
+  
+  Provides functions to parse and compose URI
+  strings.  The following functions are provided:
+  
+  =over
+  
+  =item ($scheme, $auth, $path, $query, $frag) = uri_split($uri)
+  
+  Breaks up a URI string into its component
+  parts.  An C<undef> value is returned for those parts that are not
+  present.  The $path part is always present (but can be the empty
+  string) and is thus never returned as C<undef>.
+  
+  No sensible value is returned if this function is called in a scalar
+  context.
+  
+  =item $uri = uri_join($scheme, $auth, $path, $query, $frag)
+  
+  Puts together a URI string from its parts.
+  Missing parts are signaled by passing C<undef> for the corresponding
+  argument.
+  
+  Minimal escaping is applied to parts that contain reserved chars
+  that would confuse a parser.  For instance, any occurrence of '?' or '#'
+  in $path is always escaped, as it would otherwise be parsed back
+  as a query or fragment.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<URI>, L<URI::Escape>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 2003, Gisle Aas
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+URI_SPLIT
+
+$fatpacked{"URI/URL.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_URL';
+  package URI::URL;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::WithBase';
+  
+  our $VERSION = '5.21';
+  
+  # Provide as much as possible of the old URI::URL interface for backwards
+  # compatibility...
+  
+  use Exporter 5.57 'import';
+  our @EXPORT = qw(url);
+  
+  # Easy to use constructor
+  sub url ($;$) { URI::URL->new(@_); }
+  
+  use URI::Escape qw(uri_unescape);
+  
+  sub new
+  {
+      my $class = shift;
+      my $self = $class->SUPER::new(@_);
+      $self->[0] = $self->[0]->canonical;
+      $self;
+  }
+  
+  sub newlocal
+  {
+      my $class = shift;
+      require URI::file;
+      bless [URI::file->new_abs(shift)], $class;
+  }
+  
+  {package URI::_foreign;
+      sub _init  # hope it is not defined
+      {
+  	my $class = shift;
+  	die "Unknown URI::URL scheme $_[1]:" if $URI::URL::STRICT;
+  	$class->SUPER::_init(@_);
+      }
+  }
+  
+  sub strict
+  {
+      my $old = $URI::URL::STRICT;
+      $URI::URL::STRICT = shift if @_;
+      $old;
+  }
+  
+  sub print_on
+  {
+      my $self = shift;
+      require Data::Dumper;
+      print STDERR Data::Dumper::Dumper($self);
+  }
+  
+  sub _try
+  {
+      my $self = shift;
+      my $method = shift;
+      scalar(eval { $self->$method(@_) });
+  }
+  
+  sub crack
+  {
+      # should be overridden by subclasses
+      my $self = shift;
+      (scalar($self->scheme),
+       $self->_try("user"),
+       $self->_try("password"),
+       $self->_try("host"),
+       $self->_try("port"),
+       $self->_try("path"),
+       $self->_try("params"),
+       $self->_try("query"),
+       scalar($self->fragment),
+      )
+  }
+  
+  sub full_path
+  {
+      my $self = shift;
+      my $path = $self->path_query;
+      $path = "/" unless length $path;
+      $path;
+  }
+  
+  sub netloc
+  {
+      shift->authority(@_);
+  }
+  
+  sub epath
+  {
+      my $path = shift->SUPER::path(@_);
+      $path =~ s/;.*//;
+      $path;
+  }
+  
+  sub eparams
+  {
+      my $self = shift;
+      my @p = $self->path_segments;
+      return undef unless ref($p[-1]);
+      @p = @{$p[-1]};
+      shift @p;
+      join(";", @p);
+  }
+  
+  sub params { shift->eparams(@_); }
+  
+  sub path {
+      my $self = shift;
+      my $old = $self->epath(@_);
+      return unless defined wantarray;
+      return '/' if !defined($old) || !length($old);
+      Carp::croak("Path components contain '/' (you must call epath)")
+  	if $old =~ /%2[fF]/ and !@_;
+      $old = "/$old" if $old !~ m|^/| && defined $self->netloc;
+      return uri_unescape($old);
+  }
+  
+  sub path_components {
+      shift->path_segments(@_);
+  }
+  
+  sub query {
+      my $self = shift;
+      my $old = $self->equery(@_);
+      if (defined(wantarray) && defined($old)) {
+  	if ($old =~ /%(?:26|2[bB]|3[dD])/) {  # contains escaped '=' '&' or '+'
+  	    my $mess;
+  	    for ($old) {
+  		$mess = "Query contains both '+' and '%2B'"
+  		  if /\+/ && /%2[bB]/;
+  		$mess = "Form query contains escaped '=' or '&'"
+  		  if /=/  && /%(?:3[dD]|26)/;
+  	    }
+  	    if ($mess) {
+  		Carp::croak("$mess (you must call equery)");
+  	    }
+  	}
+  	# Now it should be safe to unescape the string without losing
+  	# information
+  	return uri_unescape($old);
+      }
+      undef;
+  
+  }
+  
+  sub abs
+  {
+      my $self = shift;
+      my $base = shift;
+      my $allow_scheme = shift;
+      $allow_scheme = $URI::URL::ABS_ALLOW_RELATIVE_SCHEME
+  	unless defined $allow_scheme;
+      local $URI::ABS_ALLOW_RELATIVE_SCHEME = $allow_scheme;
+      local $URI::ABS_REMOTE_LEADING_DOTS = $URI::URL::ABS_REMOTE_LEADING_DOTS;
+      $self->SUPER::abs($base);
+  }
+  
+  sub frag { shift->fragment(@_); }
+  sub keywords { shift->query_keywords(@_); }
+  
+  # file:
+  sub local_path { shift->file; }
+  sub unix_path  { shift->file("unix"); }
+  sub dos_path   { shift->file("dos");  }
+  sub mac_path   { shift->file("mac");  }
+  sub vms_path   { shift->file("vms");  }
+  
+  # mailto:
+  sub address { shift->to(@_); }
+  sub encoded822addr { shift->to(@_); }
+  sub URI::mailto::authority { shift->to(@_); }  # make 'netloc' method work
+  
+  # news:
+  sub groupart { shift->_group(@_); }
+  sub article  { shift->message(@_); }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::URL - Uniform Resource Locators
+  
+  =head1 SYNOPSIS
+  
+   $u1 = URI::URL->new($str, $base);
+   $u2 = $u1->abs;
+  
+  =head1 DESCRIPTION
+  
+  This module is provided for backwards compatibility with modules that
+  depend on the interface provided by the C<URI::URL> class that used to
+  be distributed with the libwww-perl library.
+  
+  The following differences exist compared to the C<URI> class interface:
+  
+  =over 3
+  
+  =item *
+  
+  The URI::URL module exports the url() function as an alternate
+  constructor interface.
+  
+  =item *
+  
+  The constructor takes an optional $base argument.  The C<URI::URL>
+  class is a subclass of C<URI::WithBase>.
+  
+  =item *
+  
+  The URI::URL->newlocal class method is the same as URI::file->new_abs.
+  
+  =item *
+  
+  URI::URL::strict(1)
+  
+  =item *
+  
+  $url->print_on method
+  
+  =item *
+  
+  $url->crack method
+  
+  =item *
+  
+  $url->full_path: same as ($uri->abs_path || "/")
+  
+  =item *
+  
+  $url->netloc: same as $uri->authority
+  
+  =item *
+  
+  $url->epath, $url->equery: same as $uri->path, $uri->query
+  
+  =item *
+  
+  $url->path and $url->query pass unescaped strings.
+  
+  =item *
+  
+  $url->path_components: same as $uri->path_segments (if you don't
+  consider path segment parameters)
+  
+  =item *
+  
+  $url->params and $url->eparams methods
+  
+  =item *
+  
+  $url->base method.  See L<URI::WithBase>.
+  
+  =item *
+  
+  $url->abs and $url->rel have an optional $base argument.  See
+  L<URI::WithBase>.
+  
+  =item *
+  
+  $url->frag: same as $uri->fragment
+  
+  =item *
+  
+  $url->keywords: same as $uri->query_keywords
+  
+  =item *
+  
+  $url->localpath and friends map to $uri->file.
+  
+  =item *
+  
+  $url->address and $url->encoded822addr: same as $uri->to for mailto URI
+  
+  =item *
+  
+  $url->groupart method for news URI
+  
+  =item *
+  
+  $url->article: same as $uri->message
+  
+  =back
+  
+  
+  
+  =head1 SEE ALSO
+  
+  L<URI>, L<URI::WithBase>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1998-2000 Gisle Aas.
+  
+  =cut
+URI_URL
+
+$fatpacked{"URI/WithBase.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_WITHBASE';
+  package URI::WithBase;
+  
+  use strict;
+  use warnings;
+  
+  use URI ();
+  use Scalar::Util qw(blessed);
+  
+  our $VERSION = '5.21';
+  
+  use overload '""' => "as_string", fallback => 1;
+  
+  sub as_string;  # help overload find it
+  
+  sub new
+  {
+      my($class, $uri, $base) = @_;
+      my $ibase = $base;
+      if ($base && blessed($base) && $base->isa(__PACKAGE__)) {
+  	$base = $base->abs;
+  	$ibase = $base->[0];
+      }
+      bless [URI->new($uri, $ibase), $base], $class;
+  }
+  
+  sub new_abs
+  {
+      my $class = shift;
+      my $self = $class->new(@_);
+      $self->abs;
+  }
+  
+  sub _init
+  {
+      my $class = shift;
+      my($str, $scheme) = @_;
+      bless [URI->new($str, $scheme), undef], $class;
+  }
+  
+  sub eq
+  {
+      my($self, $other) = @_;
+      $other = $other->[0] if blessed($other) and $other->isa(__PACKAGE__);
+      $self->[0]->eq($other);
+  }
+  
+  our $AUTOLOAD;
+  sub AUTOLOAD
+  {
+      my $self = shift;
+      my $method = substr($AUTOLOAD, rindex($AUTOLOAD, '::')+2);
+      return if $method eq "DESTROY";
+      $self->[0]->$method(@_);
+  }
+  
+  sub can {                                  # override UNIVERSAL::can
+      my $self = shift;
+      $self->SUPER::can(@_) || (
+        ref($self)
+        ? $self->[0]->can(@_)
+        : undef
+      )
+  }
+  
+  sub base {
+      my $self = shift;
+      my $base  = $self->[1];
+  
+      if (@_) { # set
+  	my $new_base = shift;
+  	# ensure absoluteness
+  	$new_base = $new_base->abs if ref($new_base) && $new_base->isa(__PACKAGE__);
+  	$self->[1] = $new_base;
+      }
+      return unless defined wantarray;
+  
+      # The base attribute supports 'lazy' conversion from URL strings
+      # to URL objects. Strings may be stored but when a string is
+      # fetched it will automatically be converted to a URL object.
+      # The main benefit is to make it much cheaper to say:
+      #   URI::WithBase->new($random_url_string, 'http:')
+      if (defined($base) && !ref($base)) {
+  	$base = ref($self)->new($base);
+  	$self->[1] = $base unless @_;
+      }
+      $base;
+  }
+  
+  sub clone
+  {
+      my $self = shift;
+      my $base = $self->[1];
+      $base = $base->clone if ref($base);
+      bless [$self->[0]->clone, $base], ref($self);
+  }
+  
+  sub abs
+  {
+      my $self = shift;
+      my $base = shift || $self->base || return $self->clone;
+      $base = $base->as_string if ref($base);
+      bless [$self->[0]->abs($base, @_), $base], ref($self);
+  }
+  
+  sub rel
+  {
+      my $self = shift;
+      my $base = shift || $self->base || return $self->clone;
+      $base = $base->as_string if ref($base);
+      bless [$self->[0]->rel($base, @_), $base], ref($self);
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::WithBase - URIs which remember their base
+  
+  =head1 SYNOPSIS
+  
+   $u1 = URI::WithBase->new($str, $base);
+   $u2 = $u1->abs;
+  
+   $base = $u1->base;
+   $u1->base( $new_base )
+  
+  =head1 DESCRIPTION
+  
+  This module provides the C<URI::WithBase> class.  Objects of this class
+  are like C<URI> objects, but can keep their base too.  The base
+  represents the context where this URI was found and can be used to
+  absolutize or relativize the URI.  All the methods described in L<URI>
+  are supported for C<URI::WithBase> objects.
+  
+  The methods provided in addition to or modified from those of C<URI> are:
+  
+  =over 4
+  
+  =item $uri = URI::WithBase->new($str, [$base])
+  
+  The constructor takes an optional base URI as the second argument.
+  If provided, this argument initializes the base attribute.
+  
+  =item $uri->base( [$new_base] )
+  
+  Can be used to get or set the value of the base attribute.
+  The return value, which is the old value, is a URI object or C<undef>.
+  
+  =item $uri->abs( [$base_uri] )
+  
+  The $base_uri argument is now made optional as the object carries its
+  base with it.  A new object is returned even if $uri is already
+  absolute (while plain URI objects simply return themselves in
+  that case).
+  
+  =item $uri->rel( [$base_uri] )
+  
+  The $base_uri argument is now made optional as the object carries its
+  base with it.  A new object is always returned.
+  
+  =back
+  
+  
+  =head1 SEE ALSO
+  
+  L<URI>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1998-2002 Gisle Aas.
+  
+  =cut
+URI_WITHBASE
+
+$fatpacked{"URI/_foreign.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__FOREIGN';
+  package URI::_foreign;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::_generic';
+  
+  our $VERSION = '5.21';
+  
+  1;
+URI__FOREIGN
+
+$fatpacked{"URI/_generic.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__GENERIC';
+  package URI::_generic;
+  
+  use strict;
+  use warnings;
+  
+  use parent qw(URI URI::_query);
+  
+  use URI::Escape qw(uri_unescape);
+  use Carp ();
+  
+  our $VERSION = '5.21';
+  
+  my $ACHAR = URI::HAS_RESERVED_SQUARE_BRACKETS ? $URI::uric : $URI::uric4host;  $ACHAR =~ s,\\[/?],,g;
+  my $PCHAR = $URI::uric;                                                        $PCHAR =~ s,\\[?],,g;
+  
+  sub _no_scheme_ok { 1 }
+  
+  our $IPv6_re;
+  
+  sub _looks_like_raw_ip6_address {
+    my $addr = shift;
+  
+    if ( !$IPv6_re ) { #-- lazy / runs once / use Regexp::IPv6 if installed
+      eval {
+        require Regexp::IPv6;
+        Regexp::IPv6->import( qw($IPv6_re) );
+        1;
+      }  ||  do { $IPv6_re = qr/[:0-9a-f]{3,}/; }; #-- fallback: unambitious guess
+    }
+  
+    return 0 unless $addr;
+    return 0 if $addr =~ tr/:/:/ < 2;  #-- fallback must not create false positive for IPv4:Port = 0:0
+    return 1 if $addr =~ /^$IPv6_re$/i;
+    return 0;
+  }
+  
+  
+  sub authority
+  {
+      my $self = shift;
+      $$self =~ m,^((?:$URI::scheme_re:)?)(?://([^/?\#]*))?(.*)$,os or die;
+  
+      if (@_) {
+  	my $auth = shift;
+  	$$self = $1;
+  	my $rest = $3;
+  	if (defined $auth) {
+  	    $auth =~ s/([^$ACHAR])/ URI::Escape::escape_char($1)/ego;
+              if ( my ($user, $host) = $auth =~ /^(.*@)?([^@]+)$/ ) { #-- special escape userinfo part
+                $user ||= '';
+                $user =~ s/([^$URI::uric4user])/ URI::Escape::escape_char($1)/ego;
+                $user =~ s/%40$/\@/; # recover final '@'
+                $host = "[$host]" if _looks_like_raw_ip6_address( $host );
+                $auth = $user . $host;
+              }
+  	    utf8::downgrade($auth);
+  	    $$self .= "//$auth";
+  	}
+  	_check_path($rest, $$self);
+  	$$self .= $rest;
+      }
+      $2;
+  }
+  
+  sub path
+  {
+      my $self = shift;
+      $$self =~ m,^((?:[^:/?\#]+:)?(?://[^/?\#]*)?)([^?\#]*)(.*)$,s or die;
+  
+      if (@_) {
+  	$$self = $1;
+  	my $rest = $3;
+  	my $new_path = shift;
+  	$new_path = "" unless defined $new_path;
+  	$new_path =~ s/([^$PCHAR])/ URI::Escape::escape_char($1)/ego;
+  	utf8::downgrade($new_path);
+  	_check_path($new_path, $$self);
+  	$$self .= $new_path . $rest;
+      }
+      $2;
+  }
+  
+  sub path_query
+  {
+      my $self = shift;
+      $$self =~ m,^((?:[^:/?\#]+:)?(?://[^/?\#]*)?)([^\#]*)(.*)$,s or die;
+  
+      if (@_) {
+  	$$self = $1;
+  	my $rest = $3;
+  	my $new_path = shift;
+  	$new_path = "" unless defined $new_path;
+  	$new_path =~ s/([^$URI::uric])/ URI::Escape::escape_char($1)/ego;
+  	utf8::downgrade($new_path);
+  	_check_path($new_path, $$self);
+  	$$self .= $new_path . $rest;
+      }
+      $2;
+  }
+  
+  sub _check_path
+  {
+      my($path, $pre) = @_;
+      my $prefix;
+      if ($pre =~ m,/,) {  # authority present
+  	$prefix = "/" if length($path) && $path !~ m,^[/?\#],;
+      }
+      else {
+  	if ($path =~ m,^//,) {
+  	    Carp::carp("Path starting with double slash is confusing")
+  		if $^W;
+  	}
+  	elsif (!length($pre) && $path =~ m,^[^:/?\#]+:,) {
+  	    Carp::carp("Path might look like scheme, './' prepended")
+  		if $^W;
+  	    $prefix = "./";
+  	}
+      }
+      substr($_[0], 0, 0) = $prefix if defined $prefix;
+  }
+  
+  sub path_segments
+  {
+      my $self = shift;
+      my $path = $self->path;
+      if (@_) {
+  	my @arg = @_;  # make a copy
+  	for (@arg) {
+  	    if (ref($_)) {
+  		my @seg = @$_;
+  		$seg[0] =~ s/%/%25/g;
+  		for (@seg) { s/;/%3B/g; }
+  		$_ = join(";", @seg);
+  	    }
+  	    else {
+  		 s/%/%25/g; s/;/%3B/g;
+  	    }
+  	    s,/,%2F,g;
+  	}
+  	$self->path(join("/", @arg));
+      }
+      return $path unless wantarray;
+      map {/;/ ? $self->_split_segment($_)
+               : uri_unescape($_) }
+          split('/', $path, -1);
+  }
+  
+  
+  sub _split_segment
+  {
+      my $self = shift;
+      require URI::_segment;
+      URI::_segment->new(@_);
+  }
+  
+  
+  sub abs
+  {
+      my $self = shift;
+      my $base = shift || Carp::croak("Missing base argument");
+  
+      if (my $scheme = $self->scheme) {
+  	return $self unless $URI::ABS_ALLOW_RELATIVE_SCHEME;
+  	$base = URI->new($base) unless ref $base;
+  	return $self unless $scheme eq $base->scheme;
+      }
+  
+      $base = URI->new($base) unless ref $base;
+      my $abs = $self->clone;
+      $abs->scheme($base->scheme);
+      return $abs if $$self =~ m,^(?:$URI::scheme_re:)?//,o;
+      $abs->authority($base->authority);
+  
+      my $path = $self->path;
+      return $abs if $path =~ m,^/,;
+  
+      if (!length($path)) {
+  	my $abs = $base->clone;
+  	my $query = $self->query;
+  	$abs->query($query) if defined $query;
+  	my $fragment = $self->fragment;
+  	$abs->fragment($fragment) if defined $fragment;
+  	return $abs;
+      }
+  
+      my $p = $base->path;
+      $p =~ s,[^/]+$,,;
+      $p .= $path;
+      my @p = split('/', $p, -1);
+      shift(@p) if @p && !length($p[0]);
+      my $i = 1;
+      while ($i < @p) {
+  	#print "$i ", join("/", @p), " ($p[$i])\n";
+  	if ($p[$i-1] eq ".") {
+  	    splice(@p, $i-1, 1);
+  	    $i-- if $i > 1;
+  	}
+  	elsif ($p[$i] eq ".." && $p[$i-1] ne "..") {
+  	    splice(@p, $i-1, 2);
+  	    if ($i > 1) {
+  		$i--;
+  		push(@p, "") if $i == @p;
+  	    }
+  	}
+  	else {
+  	    $i++;
+  	}
+      }
+      $p[-1] = "" if @p && $p[-1] eq ".";  # trailing "/."
+      if ($URI::ABS_REMOTE_LEADING_DOTS) {
+          shift @p while @p && $p[0] =~ /^\.\.?$/;
+      }
+      $abs->path("/" . join("/", @p));
+      $abs;
+  }
+  
+  # The opposite of $url->abs.  Return a URI which is as relative as possible
+  sub rel {
+      my $self = shift;
+      my $base = shift || Carp::croak("Missing base argument");
+      my $rel = $self->clone;
+      $base = URI->new($base) unless ref $base;
+  
+      #my($scheme, $auth, $path) = @{$rel}{qw(scheme authority path)};
+      my $scheme = $rel->scheme;
+      my $auth   = $rel->canonical->authority;
+      my $path   = $rel->path;
+  
+      if (!defined($scheme) && !defined($auth)) {
+  	# it is already relative
+  	return $rel;
+      }
+  
+      #my($bscheme, $bauth, $bpath) = @{$base}{qw(scheme authority path)};
+      my $bscheme = $base->scheme;
+      my $bauth   = $base->canonical->authority;
+      my $bpath   = $base->path;
+  
+      for ($bscheme, $bauth, $auth) {
+  	$_ = '' unless defined
+      }
+  
+      unless ($scheme eq $bscheme && $auth eq $bauth) {
+  	# different location, can't make it relative
+  	return $rel;
+      }
+  
+      for ($path, $bpath) {  $_ = "/$_" unless m,^/,; }
+  
+      # Make it relative by eliminating scheme and authority
+      $rel->scheme(undef);
+      $rel->authority(undef);
+  
+      # This loop is based on code from Nicolai Langfeldt <janl@ifi.uio.no>.
+      # First we calculate common initial path components length ($li).
+      my $li = 1;
+      while (1) {
+  	my $i = index($path, '/', $li);
+  	last if $i < 0 ||
+                  $i != index($bpath, '/', $li) ||
+  	        substr($path,$li,$i-$li) ne substr($bpath,$li,$i-$li);
+  	$li=$i+1;
+      }
+      # then we nuke it from both paths
+      substr($path, 0,$li) = '';
+      substr($bpath,0,$li) = '';
+  
+      if ($path eq $bpath &&
+          defined($rel->fragment) &&
+          !defined($rel->query)) {
+          $rel->path("");
+      }
+      else {
+          # Add one "../" for each path component left in the base path
+          $path = ('../' x $bpath =~ tr|/|/|) . $path;
+  	$path = "./" if $path eq "";
+          $rel->path($path);
+      }
+  
+      $rel;
+  }
+  
+  1;
+URI__GENERIC
+
+$fatpacked{"URI/_idna.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__IDNA';
+  package URI::_idna;
+  
+  # This module implements the RFCs 3490 (IDNA) and 3491 (Nameprep)
+  # based on Python-2.6.4/Lib/encodings/idna.py
+  
+  use strict;
+  use warnings;
+  
+  use URI::_punycode qw(decode_punycode encode_punycode);
+  use Carp qw(croak);
+  
+  our $VERSION = '5.21';
+  
+  BEGIN {
+    *URI::_idna::_ENV_::JOIN_LEAKS_UTF8_FLAGS = "$]" < 5.008_003
+      ? sub () { 1 }
+      : sub () { 0 }
+    ;
+  }
+  
+  my $ASCII = qr/^[\x00-\x7F]*\z/;
+  
+  sub encode {
+      my $idomain = shift;
+      my @labels = split(/\./, $idomain, -1);
+      my @last_empty;
+      push(@last_empty, pop @labels) if @labels > 1 && $labels[-1] eq "";
+      for (@labels) {
+  	$_ = ToASCII($_);
+      }
+  
+      return eval 'join(".", @labels, @last_empty)' if URI::_idna::_ENV_::JOIN_LEAKS_UTF8_FLAGS;
+      return join(".", @labels, @last_empty);
+  }
+  
+  sub decode {
+      my $domain = shift;
+      return join(".", map ToUnicode($_), split(/\./, $domain, -1))
+  }
+  
+  sub nameprep { # XXX real implementation missing
+      my $label = shift;
+      $label = lc($label);
+      return $label;
+  }
+  
+  sub check_size {
+      my $label = shift;
+      croak "Label empty" if $label eq "";
+      croak "Label too long" if length($label) > 63;
+      return $label;
+  }
+  
+  sub ToASCII {
+      my $label = shift;
+      return check_size($label) if $label =~ $ASCII;
+  
+      # Step 2: nameprep
+      $label = nameprep($label);
+      # Step 3: UseSTD3ASCIIRules is false
+      # Step 4: try ASCII again
+      return check_size($label) if $label =~ $ASCII;
+  
+      # Step 5: Check ACE prefix
+      if ($label =~ /^xn--/) {
+          croak "Label starts with ACE prefix";
+      }
+  
+      # Step 6: Encode with PUNYCODE
+      $label = encode_punycode($label);
+  
+      # Step 7: Prepend ACE prefix
+      $label = "xn--$label";
+  
+      # Step 8: Check size
+      return check_size($label);
+  }
+  
+  sub ToUnicode {
+      my $label = shift;
+      $label = nameprep($label) unless $label =~ $ASCII;
+      return $label unless $label =~ /^xn--/;
+      my $result = decode_punycode(substr($label, 4));
+      my $label2 = ToASCII($result);
+      if (lc($label) ne $label2) {
+  	croak "IDNA does not round-trip: '\L$label\E' vs '$label2'";
+      }
+      return $result;
+  }
+  
+  1;
+URI__IDNA
+
+$fatpacked{"URI/_ldap.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__LDAP';
+  # Copyright (c) 1998 Graham Barr <gbarr@pobox.com>. All rights reserved.
+  # This program is free software; you can redistribute it and/or
+  # modify it under the same terms as Perl itself.
+  
+  package URI::_ldap;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  sub _ldap_elem {
+    my $self  = shift;
+    my $elem  = shift;
+    my $query = $self->query;
+    my @bits  = (split(/\?/,defined($query) ? $query : ""),("")x4);
+    my $old   = $bits[$elem];
+  
+    if (@_) {
+      my $new = shift;
+      $new =~ s/\?/%3F/g;
+      $bits[$elem] = $new;
+      $query = join("?",@bits);
+      $query =~ s/\?+$//;
+      $query = undef unless length($query);
+      $self->query($query);
+    }
+  
+    $old;
+  }
+  
+  sub dn {
+    my $old = shift->path(@_);
+    $old =~ s:^/::;
+    uri_unescape($old);
+  }
+  
+  sub attributes {
+    my $self = shift;
+    my $old = _ldap_elem($self,0, @_ ? join(",", map { my $tmp = $_; $tmp =~ s/,/%2C/g; $tmp } @_) : ());
+    return $old unless wantarray;
+    map { uri_unescape($_) } split(/,/,$old);
+  }
+  
+  sub _scope {
+    my $self = shift;
+    my $old = _ldap_elem($self,1, @_);
+    return undef unless defined wantarray && defined $old;
+    uri_unescape($old);
+  }
+  
+  sub scope {
+    my $old = &_scope;
+    $old = "base" unless length $old;
+    $old;
+  }
+  
+  sub _filter {
+    my $self = shift;
+    my $old = _ldap_elem($self,2, @_);
+    return undef unless defined wantarray && defined $old;
+    uri_unescape($old); # || "(objectClass=*)";
+  }
+  
+  sub filter {
+    my $old = &_filter;
+    $old = "(objectClass=*)" unless length $old;
+    $old;
+  }
+  
+  sub extensions {
+    my $self = shift;
+    my @ext;
+    while (@_) {
+      my $key = shift;
+      my $value = shift;
+      push(@ext, join("=", map { $_="" unless defined; s/,/%2C/g; $_ } $key, $value));
+    }
+    @ext = join(",", @ext) if @ext;
+    my $old = _ldap_elem($self,3, @ext);
+    return $old unless wantarray;
+    map { uri_unescape($_) } map { /^([^=]+)=(.*)$/ } split(/,/,$old);
+  }
+  
+  sub canonical
+  {
+      my $self = shift;
+      my $other = $self->_nonldap_canonical;
+  
+      # The stuff below is not as efficient as one might hope...
+  
+      $other = $other->clone if $other == $self;
+  
+      $other->dn(_normalize_dn($other->dn));
+  
+      # Should really know about mixed case "postalAddress", etc...
+      $other->attributes(map lc, $other->attributes);
+  
+      # Lowercase scope, remove default
+      my $old_scope = $other->scope;
+      my $new_scope = lc($old_scope);
+      $new_scope = "" if $new_scope eq "base";
+      $other->scope($new_scope) if $new_scope ne $old_scope;
+  
+      # Remove filter if default
+      my $old_filter = $other->filter;
+      $other->filter("") if lc($old_filter) eq "(objectclass=*)" ||
+  	                  lc($old_filter) eq "objectclass=*";
+  
+      # Lowercase extensions types and deal with known extension values
+      my @ext = $other->extensions;
+      for (my $i = 0; $i < @ext; $i += 2) {
+  	my $etype = $ext[$i] = lc($ext[$i]);
+  	if ($etype =~ /^!?bindname$/) {
+  	    $ext[$i+1] = _normalize_dn($ext[$i+1]);
+  	}
+      }
+      $other->extensions(@ext) if @ext;
+      
+      $other;
+  }
+  
+  sub _normalize_dn  # RFC 2253
+  {
+      my $dn = shift;
+  
+      return $dn;
+      # The code below will fail if the "+" or "," is embedding in a quoted
+      # string or simply escaped...
+  
+      my @dn = split(/([+,])/, $dn);
+      for (@dn) {
+  	s/^([a-zA-Z]+=)/lc($1)/e;
+      }
+      join("", @dn);
+  }
+  
+  1;
+URI__LDAP
+
+$fatpacked{"URI/_login.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__LOGIN';
+  package URI::_login;
+  
+  use strict;
+  use warnings;
+  
+  use parent qw(URI::_server URI::_userpass);
+  
+  our $VERSION = '5.21';
+  
+  # Generic terminal logins.  This is used as a base class for 'telnet',
+  # 'tn3270', and 'rlogin' URL schemes.
+  
+  1;
+URI__LOGIN
+
+$fatpacked{"URI/_punycode.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__PUNYCODE';
+  package URI::_punycode;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use Exporter 'import';
+  our @EXPORT = qw(encode_punycode decode_punycode);
+  
+  use integer;
+  
+  our $DEBUG = 0;
+  
+  use constant BASE => 36;
+  use constant TMIN => 1;
+  use constant TMAX => 26;
+  use constant SKEW => 38;
+  use constant DAMP => 700;
+  use constant INITIAL_BIAS => 72;
+  use constant INITIAL_N => 128;
+  
+  my $Delimiter = chr 0x2D;
+  my $BasicRE   = qr/[\x00-\x7f]/;
+  
+  sub _croak { require Carp; Carp::croak(@_); }
+  
+  sub _digit_value {
+      my $code = shift;
+      return ord($code) - ord("A") if $code =~ /[A-Z]/;
+      return ord($code) - ord("a") if $code =~ /[a-z]/;
+      return ord($code) - ord("0") + 26 if $code =~ /[0-9]/;
+      return;
+  }
+  
+  sub _code_point {
+      my $digit = shift;
+      return $digit + ord('a') if 0 <= $digit && $digit <= 25;
+      return $digit + ord('0') - 26 if 26 <= $digit && $digit <= 36;
+      die 'NOT COME HERE';
+  }
+  
+  sub _adapt {
+      my($delta, $numpoints, $firsttime) = @_;
+      $delta = $firsttime ? $delta / DAMP : $delta / 2;
+      $delta += $delta / $numpoints;
+      my $k = 0;
+      while ($delta > ((BASE - TMIN) * TMAX) / 2) {
+  	$delta /= BASE - TMIN;
+  	$k += BASE;
+      }
+      return $k + (((BASE - TMIN + 1) * $delta) / ($delta + SKEW));
+  }
+  
+  sub decode_punycode {
+      my $code = shift;
+  
+      my $n      = INITIAL_N;
+      my $i      = 0;
+      my $bias   = INITIAL_BIAS;
+      my @output;
+  
+      if ($code =~ s/(.*)$Delimiter//o) {
+  	push @output, map ord, split //, $1;
+  	return _croak('non-basic code point') unless $1 =~ /^$BasicRE*$/o;
+      }
+  
+      while ($code) {
+  	my $oldi = $i;
+  	my $w    = 1;
+      LOOP:
+  	for (my $k = BASE; 1; $k += BASE) {
+  	    my $cp = substr($code, 0, 1, '');
+  	    my $digit = _digit_value($cp);
+  	    defined $digit or return _croak("invalid punycode input");
+  	    $i += $digit * $w;
+  	    my $t = ($k <= $bias) ? TMIN
+  		: ($k >= $bias + TMAX) ? TMAX : $k - $bias;
+  	    last LOOP if $digit < $t;
+  	    $w *= (BASE - $t);
+  	}
+  	$bias = _adapt($i - $oldi, @output + 1, $oldi == 0);
+  	warn "bias becomes $bias" if $DEBUG;
+  	$n += $i / (@output + 1);
+  	$i = $i % (@output + 1);
+  	splice(@output, $i, 0, $n);
+  	warn join " ", map sprintf('%04x', $_), @output if $DEBUG;
+  	$i++;
+      }
+      return join '', map chr, @output;
+  }
+  
+  sub encode_punycode {
+      my $input = shift;
+      my @input = split //, $input;
+  
+      my $n     = INITIAL_N;
+      my $delta = 0;
+      my $bias  = INITIAL_BIAS;
+  
+      my @output;
+      my @basic = grep /$BasicRE/, @input;
+      my $h = my $b = @basic;
+      push @output, @basic;
+      push @output, $Delimiter if $b && $h < @input;
+      warn "basic codepoints: (@output)" if $DEBUG;
+  
+      while ($h < @input) {
+  	my $m = _min(grep { $_ >= $n } map ord, @input);
+  	warn sprintf "next code point to insert is %04x", $m if $DEBUG;
+  	$delta += ($m - $n) * ($h + 1);
+  	$n = $m;
+  	for my $i (@input) {
+  	    my $c = ord($i);
+  	    $delta++ if $c < $n;
+  	    if ($c == $n) {
+  		my $q = $delta;
+  	    LOOP:
+  		for (my $k = BASE; 1; $k += BASE) {
+  		    my $t = ($k <= $bias) ? TMIN :
+  			($k >= $bias + TMAX) ? TMAX : $k - $bias;
+  		    last LOOP if $q < $t;
+  		    my $cp = _code_point($t + (($q - $t) % (BASE - $t)));
+  		    push @output, chr($cp);
+  		    $q = ($q - $t) / (BASE - $t);
+  		}
+  		push @output, chr(_code_point($q));
+  		$bias = _adapt($delta, $h + 1, $h == $b);
+  		warn "bias becomes $bias" if $DEBUG;
+  		$delta = 0;
+  		$h++;
+  	    }
+  	}
+  	$delta++;
+  	$n++;
+      }
+      return join '', @output;
+  }
+  
+  sub _min {
+      my $min = shift;
+      for (@_) { $min = $_ if $_ <= $min }
+      return $min;
+  }
+  
+  1;
+  __END__
+  
+  =encoding utf8
+  
+  =head1 NAME
+  
+  URI::_punycode - encodes Unicode string in Punycode
+  
+  =head1 SYNOPSIS
+  
+    use strict;
+    use warnings;
+    use utf8;
+  
+    use URI::_punycode qw(encode_punycode decode_punycode);
+  
+    # encode a unicode string
+    my $punycode = encode_punycode('http://☃.net'); # http://.net-xc8g
+    $punycode = encode_punycode('bücher'); # bcher-kva
+    $punycode = encode_punycode('他们为什么不说中文'); # ihqwcrb4cv8a8dqg056pqjye
+  
+    # decode a punycode string back into a unicode string
+    my $unicode = decode_punycode('http://.net-xc8g'); # http://☃.net
+    $unicode = decode_punycode('bcher-kva'); # bücher
+    $unicode = decode_punycode('ihqwcrb4cv8a8dqg056pqjye'); # 他们为什么不说中文
+  
+  =head1 DESCRIPTION
+  
+  L<URI::_punycode> is a module to encode / decode Unicode strings into
+  L<Punycode|https://tools.ietf.org/html/rfc3492>, an efficient
+  encoding of Unicode for use with L<IDNA|https://tools.ietf.org/html/rfc5890>.
+  
+  =head1 FUNCTIONS
+  
+  All functions throw exceptions on failure. You can C<catch> them with
+  L<Syntax::Keyword::Try> or L<Try::Tiny>. The following functions are exported
+  by default.
+  
+  =head2 encode_punycode
+  
+    my $punycode = encode_punycode('http://☃.net');  # http://.net-xc8g
+    $punycode = encode_punycode('bücher'); # bcher-kva
+    $punycode = encode_punycode('他们为什么不说中文') # ihqwcrb4cv8a8dqg056pqjye
+  
+  Takes a Unicode string (UTF8-flagged variable) and returns a Punycode
+  encoding for it.
+  
+  =head2 decode_punycode
+  
+    my $unicode = decode_punycode('http://.net-xc8g'); # http://☃.net
+    $unicode = decode_punycode('bcher-kva'); # bücher
+    $unicode = decode_punycode('ihqwcrb4cv8a8dqg056pqjye'); # 他们为什么不说中文
+  
+  Takes a Punycode encoding and returns original Unicode string.
+  
+  =head1 AUTHOR
+  
+  Tatsuhiko Miyagawa <F<miyagawa@bulknews.net>> is the author of
+  L<IDNA::Punycode> which was the basis for this module.
+  
+  =head1 SEE ALSO
+  
+  L<IDNA::Punycode>, L<RFC 3492|https://tools.ietf.org/html/rfc3492>,
+  L<RFC 5891|https://tools.ietf.org/html/rfc5891>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This library is free software; you can redistribute it and/or modify
+  it under the same terms as Perl itself.
+  
+  =cut
+URI__PUNYCODE
+
+$fatpacked{"URI/_query.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__QUERY';
+  package URI::_query;
+  
+  use strict;
+  use warnings;
+  
+  use URI ();
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.21';
+  
+  sub query
+  {
+      my $self = shift;
+      $$self =~ m,^([^?\#]*)(?:\?([^\#]*))?(.*)$,s or die;
+  
+      if (@_) {
+  	my $q = shift;
+  	$$self = $1;
+  	if (defined $q) {
+  	    $q =~ s/([^$URI::uric])/ URI::Escape::escape_char($1)/ego;
+  	    utf8::downgrade($q);
+  	    $$self .= "?$q";
+  	}
+  	$$self .= $3;
+      }
+      $2;
+  }
+  
+  # Handle ...?foo=bar&bar=foo type of query
+  sub query_form {
+      my $self = shift;
+      my $old = $self->query;
+      if (@_) {
+          # Try to set query string
+          my $delim;
+          my $r = $_[0];
+          if (ref($r) eq "ARRAY") {
+              $delim = $_[1];
+              @_ = @$r;
+          }
+          elsif (ref($r) eq "HASH") {
+              $delim = $_[1];
+              @_ = map { $_ => $r->{$_} } sort keys %$r;
+          }
+          $delim = pop if @_ % 2;
+  
+          my @query;
+          while (my($key,$vals) = splice(@_, 0, 2)) {
+              $key = '' unless defined $key;
+  	    $key =~ s/([;\/?:@&=+,\$\[\]%])/ URI::Escape::escape_char($1)/eg;
+  	    $key =~ s/ /+/g;
+  	    $vals = [ref($vals) eq "ARRAY" ? @$vals : $vals];
+              for my $val (@$vals) {
+                  if (defined $val) {
+                      $val =~ s/([;\/?:@&=+,\$\[\]%])/ URI::Escape::escape_char($1)/eg;
+                      $val =~ s/ /+/g;
+                      push(@query, "$key=$val");
+                  }
+                  else {
+                      push(@query, $key);
+                  }
+              }
+          }
+          if (@query) {
+              unless ($delim) {
+                  $delim = $1 if $old && $old =~ /([&;])/;
+                  $delim ||= $URI::DEFAULT_QUERY_FORM_DELIMITER || "&";
+              }
+              $self->query(join($delim, @query));
+          }
+          else {
+              $self->query(undef);
+          }
+      }
+      return if !defined($old) || !length($old) || !defined(wantarray);
+      return unless $old =~ /=/; # not a form
+      map { ( defined ) ? do { s/\+/ /g; uri_unescape($_) } : undef }
+           map { /=/ ? split(/=/, $_, 2) : ($_ => undef)} split(/[&;]/, $old);
+  }
+  
+  # Handle ...?dog+bones type of query
+  sub query_keywords
+  {
+      my $self = shift;
+      my $old = $self->query;
+      if (@_) {
+          # Try to set query string
+  	my @copy = @_;
+  	@copy = @{$copy[0]} if @copy == 1 && ref($copy[0]) eq "ARRAY";
+  	for (@copy) { s/([;\/?:@&=+,\$\[\]%])/ URI::Escape::escape_char($1)/eg; }
+  	$self->query(@copy ? join('+', @copy) : undef);
+      }
+      return if !defined($old) || !defined(wantarray);
+      return if $old =~ /=/;  # not keywords, but a form
+      map { uri_unescape($_) } split(/\+/, $old, -1);
+  }
+  
+  # Some URI::URL compatibility stuff
+  sub equery { goto &query }
+  
+  sub query_param {
+      my $self = shift;
+      my @old = $self->query_form;
+  
+      if (@_ == 0) {
+          # get keys
+          my (%seen, $i);
+          return grep !($i++ % 2 || $seen{$_}++), @old;
+      }
+  
+      my $key = shift;
+      my @i = grep $_ % 2 == 0 && $old[$_] eq $key, 0 .. $#old;
+  
+      if (@_) {
+          my @new = @old;
+          my @new_i = @i;
+          my @vals = map { ref($_) eq 'ARRAY' ? @$_ : $_ } @_;
+  
+          while (@new_i > @vals) {
+              splice @new, pop @new_i, 2;
+          }
+          if (@vals > @new_i) {
+              my $i = @new_i ? $new_i[-1] + 2 : @new;
+              my @splice = splice @vals, @new_i, @vals - @new_i;
+  
+              splice @new, $i, 0, map { $key => $_ } @splice;
+          }
+          if (@vals) {
+              #print "SET $new_i[0]\n";
+              @new[ map $_ + 1, @new_i ] = @vals;
+          }
+  
+          $self->query_form(\@new);
+      }
+  
+      return wantarray ? @old[map $_+1, @i] : @i ? $old[$i[0]+1] : undef;
+  }
+  
+  sub query_param_append {
+      my $self = shift;
+      my $key = shift;
+      my @vals = map { ref $_ eq 'ARRAY' ? @$_ : $_ } @_;
+      $self->query_form($self->query_form, $key => \@vals);  # XXX
+      return;
+  }
+  
+  sub query_param_delete {
+      my $self = shift;
+      my $key = shift;
+      my @old = $self->query_form;
+      my @vals;
+  
+      for (my $i = @old - 2; $i >= 0; $i -= 2) {
+          next if $old[$i] ne $key;
+          push(@vals, (splice(@old, $i, 2))[1]);
+      }
+      $self->query_form(\@old) if @vals;
+      return wantarray ? reverse @vals : $vals[-1];
+  }
+  
+  sub query_form_hash {
+      my $self = shift;
+      my @old = $self->query_form;
+      if (@_) {
+          $self->query_form(@_ == 1 ? %{shift(@_)} : @_);
+      }
+      my %hash;
+      while (my($k, $v) = splice(@old, 0, 2)) {
+          if (exists $hash{$k}) {
+              for ($hash{$k}) {
+                  $_ = [$_] unless ref($_) eq "ARRAY";
+                  push(@$_, $v);
+              }
+          }
+          else {
+              $hash{$k} = $v;
+          }
+      }
+      return \%hash;
+  }
+  
+  1;
+URI__QUERY
+
+$fatpacked{"URI/_segment.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__SEGMENT';
+  package URI::_segment;
+  
+  # Represents a generic path_segment so that it can be treated as
+  # a string too.
+  
+  use strict;
+  use warnings;
+  
+  use URI::Escape qw(uri_unescape);
+  
+  use overload '""' => sub { $_[0]->[0] },
+               fallback => 1;
+  
+  our $VERSION = '5.21';
+  
+  sub new
+  {
+      my $class = shift;
+      my @segment = split(';', shift, -1);
+      $segment[0] = uri_unescape($segment[0]);
+      bless \@segment, $class;
+  }
+  
+  1;
+URI__SEGMENT
+
+$fatpacked{"URI/_server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__SERVER';
+  package URI::_server;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::_generic';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.21';
+  
+  sub _uric_escape {
+      my($class, $str) = @_;
+      if ($str =~ m,^((?:$URI::scheme_re:)?)//([^/?\#]*)(.*)$,os) {
+  	my($scheme, $host, $rest) = ($1, $2, $3);
+  	my $ui = $host =~ s/(.*@)// ? $1 : "";
+  	my $port = $host =~ s/(:\d+)\z// ? $1 : "";
+  	if (_host_escape($host)) {
+  	    $str = "$scheme//$ui$host$port$rest";
+  	}
+      }
+      return $class->SUPER::_uric_escape($str);
+  }
+  
+  sub _host_escape {
+    return if  URI::HAS_RESERVED_SQUARE_BRACKETS  and  $_[0] !~ /[^$URI::uric]/;
+    return if !URI::HAS_RESERVED_SQUARE_BRACKETS  and  $_[0] !~ /[^$URI::uric4host]/;
+      eval {
+  	require URI::_idna;
+  	$_[0] = URI::_idna::encode($_[0]);
+      };
+      return 0 if $@;
+      return 1;
+  }
+  
+  sub as_iri {
+      my $self = shift;
+      my $str = $self->SUPER::as_iri;
+      if ($str =~ /\bxn--/) {
+  	if ($str =~ m,^((?:$URI::scheme_re:)?)//([^/?\#]*)(.*)$,os) {
+  	    my($scheme, $host, $rest) = ($1, $2, $3);
+  	    my $ui = $host =~ s/(.*@)// ? $1 : "";
+  	    my $port = $host =~ s/(:\d+)\z// ? $1 : "";
+  	    require URI::_idna;
+  	    $host = URI::_idna::decode($host);
+  	    $str = "$scheme//$ui$host$port$rest";
+  	}
+      }
+      return $str;
+  }
+  
+  sub userinfo
+  {
+      my $self = shift;
+      my $old = $self->authority;
+  
+      if (@_) {
+  	my $new = $old;
+  	$new = "" unless defined $new;
+  	$new =~ s/.*@//;  # remove old stuff
+  	my $ui = shift;
+  	if (defined $ui) {
+            $ui =~ s/([^$URI::uric4user])/ URI::Escape::escape_char($1)/ego;
+            $new = "$ui\@$new";
+  	}
+  	$self->authority($new);
+      }
+      return undef if !defined($old) || $old !~ /(.*)@/;
+      return $1;
+  }
+  
+  sub host
+  {
+      my $self = shift;
+      my $old = $self->authority;
+      if (@_) {
+  	my $tmp = $old;
+  	$tmp = "" unless defined $tmp;
+  	my $ui = ($tmp =~ /(.*@)/) ? $1 : "";
+  	my $port = ($tmp =~ /(:\d+)$/) ? $1 : "";
+  	my $new = shift;
+  	$new = "" unless defined $new;
+  	if (length $new) {
+  	    $new =~ s/[@]/%40/g;   # protect @
+  	    if ($new =~ /^[^:]*:\d*\z/ || $new =~ /]:\d*\z/) {
+  		$new =~ s/(:\d*)\z// || die "Assert";
+  		$port = $1;
+  	    }
+  	    $new = "[$new]" if $new =~ /:/ && $new !~ /^\[/; # IPv6 address
+  	    _host_escape($new);
+  	}
+  	$self->authority("$ui$new$port");
+      }
+      return undef unless defined $old;
+      $old =~ s/.*@//;
+      $old =~ s/:\d+$//;          # remove the port
+      $old =~ s{^\[(.*)\]$}{$1};  # remove brackets around IPv6 (RFC 3986 3.2.2)
+      return uri_unescape($old);
+  }
+  
+  sub ihost
+  {
+      my $self = shift;
+      my $old = $self->host(@_);
+      if ($old =~ /(^|\.)xn--/) {
+  	require URI::_idna;
+  	$old = URI::_idna::decode($old);
+      }
+      return $old;
+  }
+  
+  sub _port
+  {
+      my $self = shift;
+      my $old = $self->authority;
+      if (@_) {
+  	my $new = $old;
+  	$new =~ s/:\d*$//;
+  	my $port = shift;
+  	$new .= ":$port" if defined $port;
+  	$self->authority($new);
+      }
+      return $1 if defined($old) && $old =~ /:(\d*)$/;
+      return;
+  }
+  
+  sub port
+  {
+      my $self = shift;
+      my $port = $self->_port(@_);
+      $port = $self->default_port if !defined($port) || $port eq "";
+      $port;
+  }
+  
+  sub host_port
+  {
+      my $self = shift;
+      my $old = $self->authority;
+      $self->host(shift) if @_;
+      return undef unless defined $old;
+      $old =~ s/.*@//;        # zap userinfo
+      $old =~ s/:$//;         # empty port should be treated the same a no port
+      $old .= ":" . $self->port unless $old =~ /:\d+$/;
+      $old;
+  }
+  
+  
+  sub default_port { undef }
+  
+  sub canonical
+  {
+      my $self = shift;
+      my $other = $self->SUPER::canonical;
+      my $host = $other->host || "";
+      my $port = $other->_port;
+      my $uc_host = $host =~ /[A-Z]/;
+      my $def_port = defined($port) && ($port eq "" ||
+                                        $port == $self->default_port);
+      if ($uc_host || $def_port) {
+  	$other = $other->clone if $other == $self;
+  	$other->host(lc $host) if $uc_host;
+  	$other->port(undef)    if $def_port;
+      }
+      $other;
+  }
+  
+  1;
+URI__SERVER
+
+$fatpacked{"URI/_userpass.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__USERPASS';
+  package URI::_userpass;
+  
+  use strict;
+  use warnings;
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.21';
+  
+  sub user
+  {
+      my $self = shift;
+      my $info = $self->userinfo;
+      if (@_) {
+  	my $new = shift;
+  	my $pass = defined($info) ? $info : "";
+  	$pass =~ s/^[^:]*//;
+  
+  	if (!defined($new) && !length($pass)) {
+  	    $self->userinfo(undef);
+  	} else {
+  	    $new = "" unless defined($new);
+  	    $new =~ s/%/%25/g;
+  	    $new =~ s/:/%3A/g;
+  	    $self->userinfo("$new$pass");
+  	}
+      }
+      return undef unless defined $info;
+      $info =~ s/:.*//;
+      uri_unescape($info);
+  }
+  
+  sub password
+  {
+      my $self = shift;
+      my $info = $self->userinfo;
+      if (@_) {
+  	my $new = shift;
+  	my $user = defined($info) ? $info : "";
+  	$user =~ s/:.*//;
+  
+  	if (!defined($new)) {
+  	    $self->userinfo(length $user ? $user : undef);
+  	} else {
+  	    $new = "" unless defined($new);
+  	    $new =~ s/%/%25/g;
+  	    $self->userinfo("$user:$new");
+  	}
+      }
+      return undef unless defined $info;
+      return undef unless $info =~ s/^[^:]*://;
+      uri_unescape($info);
+  }
+  
+  1;
+URI__USERPASS
+
+$fatpacked{"URI/data.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_DATA';
+  package URI::data;  # RFC 2397
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI';
+  
+  our $VERSION = '5.21';
+  
+  use MIME::Base64 qw(decode_base64 encode_base64);
+  use URI::Escape qw(uri_unescape);
+  
+  sub media_type
+  {
+      my $self = shift;
+      my $opaque = $self->opaque;
+      $opaque =~ /^([^,]*),?/ or die;
+      my $old = $1;
+      my $base64;
+      $base64 = $1 if $old =~ s/(;base64)$//i;
+      if (@_) {
+  	my $new = shift;
+  	$new = "" unless defined $new;
+  	$new =~ s/%/%25/g;
+  	$new =~ s/,/%2C/g;
+  	$base64 = "" unless defined $base64;
+  	$opaque =~ s/^[^,]*,?/$new$base64,/;
+  	$self->opaque($opaque);
+      }
+      return uri_unescape($old) if $old;  # media_type can't really be "0"
+      "text/plain;charset=US-ASCII";      # default type
+  }
+  
+  sub data
+  {
+      my $self = shift;
+      my($enc, $data) = split(",", $self->opaque, 2);
+      unless (defined $data) {
+  	$data = "";
+  	$enc  = "" unless defined $enc;
+      }
+      my $base64 = ($enc =~ /;base64$/i);
+      if (@_) {
+  	$enc =~ s/;base64$//i if $base64;
+  	my $new = shift;
+  	$new = "" unless defined $new;
+  	my $uric_count = _uric_count($new);
+  	my $urienc_len = $uric_count + (length($new) - $uric_count) * 3;
+  	my $base64_len = int((length($new)+2) / 3) * 4;
+  	$base64_len += 7;  # because of ";base64" marker
+  	if ($base64_len < $urienc_len || $_[0]) {
+  	    $enc .= ";base64";
+  	    $new = encode_base64($new, "");
+  	} else {
+  	    $new =~ s/%/%25/g;
+  	}
+  	$self->opaque("$enc,$new");
+      }
+      return unless defined wantarray;
+      $data = uri_unescape($data);
+      return $base64 ? decode_base64($data) : $data;
+  }
+  
+  # I could not find a better way to interpolate the tr/// chars from
+  # a variable.
+  my $ENC = $URI::uric;
+  $ENC =~ s/%//;
+  
+  eval <<EOT; die $@ if $@;
+  sub _uric_count
+  {
+      \$_[0] =~ tr/$ENC//;
+  }
+  EOT
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::data - URI that contains immediate data
+  
+  =head1 SYNOPSIS
+  
+   use URI;
+  
+   $u = URI->new("data:");
+   $u->media_type("image/gif");
+   $u->data(scalar(`cat camel.gif`));
+   print "$u\n";
+   open(XV, "|xv -") and print XV $u->data;
+  
+  =head1 DESCRIPTION
+  
+  The C<URI::data> class supports C<URI> objects belonging to the I<data>
+  URI scheme.  The I<data> URI scheme is specified in RFC 2397.  It
+  allows inclusion of small data items as "immediate" data, as if it had
+  been included externally.  Examples:
+  
+    data:,Perl%20is%20good
+  
+    data:image/gif;base64,R0lGODdhIAAgAIAAAAAAAPj8+CwAAAAAI
+      AAgAAAClYyPqcu9AJyCjtIKc5w5xP14xgeO2tlY3nWcajmZZdeJcG
+      Kxrmimms1KMTa1Wg8UROx4MNUq1HrycMjHT9b6xKxaFLM6VRKzI+p
+      KS9XtXpcbdun6uWVxJXA8pNPkdkkxhxc21LZHFOgD2KMoQXa2KMWI
+      JtnE2KizVUkYJVZZ1nczBxXlFopZBtoJ2diXGdNUymmJdFMAADs=
+  
+  
+  
+  C<URI> objects belonging to the data scheme support the common methods
+  (described in L<URI>) and the following two scheme-specific methods:
+  
+  =over 4
+  
+  =item $uri->media_type( [$new_media_type] )
+  
+  Can be used to get or set the media type specified in the
+  URI.  If no media type is specified, then the default
+  C<"text/plain;charset=US-ASCII"> is returned.
+  
+  =item $uri->data( [$new_data] )
+  
+  Can be used to get or set the data contained in the URI.
+  The data is passed unescaped (in binary form).  The decision about
+  whether to base64 encode the data in the URI is taken automatically,
+  based on the encoding that produces the shorter URI string.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<URI>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1995-1998 Gisle Aas.
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+URI_DATA
+
+$fatpacked{"URI/file.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE';
+  package URI::file;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::_generic';
+  our $VERSION = '5.21';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $DEFAULT_AUTHORITY = "";
+  
+  # Map from $^O values to implementation classes.  The Unix
+  # class is the default.
+  our %OS_CLASS = (
+       os2     => "OS2",
+       mac     => "Mac",
+       MacOS   => "Mac",
+       MSWin32 => "Win32",
+       win32   => "Win32",
+       msdos   => "FAT",
+       dos     => "FAT",
+       qnx     => "QNX",
+  );
+  
+  sub os_class
+  {
+      my($OS) = shift || $^O;
+  
+      my $class = "URI::file::" . ($OS_CLASS{$OS} || "Unix");
+      no strict 'refs';
+      unless (%{"$class\::"}) {
+  	eval "require $class";
+  	die $@ if $@;
+      }
+      $class;
+  }
+  
+  sub host { uri_unescape(shift->authority(@_)) }
+  
+  sub new
+  {
+      my($class, $path, $os) = @_;
+      os_class($os)->new($path);
+  }
+  
+  sub new_abs
+  {
+      my $class = shift;
+      my $file = $class->new(@_);
+      return $file->abs($class->cwd) unless $$file =~ /^file:/;
+      $file;
+  }
+  
+  sub cwd
+  {
+      my $class = shift;
+      require Cwd;
+      my $cwd = Cwd::cwd();
+      $cwd = VMS::Filespec::unixpath($cwd) if $^O eq 'VMS';
+      $cwd = $class->new($cwd);
+      $cwd .= "/" unless substr($cwd, -1, 1) eq "/";
+      $cwd;
+  }
+  
+  sub canonical {
+      my $self = shift;
+      my $other = $self->SUPER::canonical;
+  
+      my $scheme = $other->scheme;
+      my $auth = $other->authority;
+      return $other if !defined($scheme) && !defined($auth);  # relative
+  
+      if (!defined($auth) ||
+  	$auth eq "" ||
+  	lc($auth) eq "localhost" ||
+  	(defined($DEFAULT_AUTHORITY) && lc($auth) eq lc($DEFAULT_AUTHORITY))
+         )
+      {
+  	# avoid cloning if $auth already match
+  	if ((defined($auth) || defined($DEFAULT_AUTHORITY)) &&
+  	    (!defined($auth) || !defined($DEFAULT_AUTHORITY) || $auth ne $DEFAULT_AUTHORITY)
+  	   )
+  	{
+  	    $other = $other->clone if $self == $other;
+  	    $other->authority($DEFAULT_AUTHORITY);
+          }
+      }
+  
+      $other;
+  }
+  
+  sub file
+  {
+      my($self, $os) = @_;
+      os_class($os)->file($self);
+  }
+  
+  sub dir
+  {
+      my($self, $os) = @_;
+      os_class($os)->dir($self);
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::file - URI that maps to local file names
+  
+  =head1 SYNOPSIS
+  
+   use URI::file;
+  
+   $u1 = URI->new("file:/foo/bar");
+   $u2 = URI->new("foo/bar", "file");
+  
+   $u3 = URI::file->new($path);
+   $u4 = URI::file->new("c:\\windows\\", "win32");
+  
+   $u1->file;
+   $u1->file("mac");
+  
+  =head1 DESCRIPTION
+  
+  The C<URI::file> class supports C<URI> objects belonging to the I<file>
+  URI scheme.  This scheme allows us to map the conventional file names
+  found on various computer systems to the URI name space,
+  see L<RFC 8089|https://www.rfc-editor.org/rfc/rfc8089.html>.
+  
+  If you simply want to construct I<file> URI objects from URI strings,
+  use the normal C<URI> constructor.  If you want to construct I<file>
+  URI objects from the actual file names used by various systems, then
+  use one of the following C<URI::file> constructors:
+  
+  =over 4
+  
+  =item $u = URI::file->new( $filename, [$os] )
+  
+  Maps a file name to the I<file:> URI name space, creates a URI object
+  and returns it.  The $filename is interpreted as belonging to the
+  indicated operating system ($os), which defaults to the value of the
+  $^O variable.  The $filename can be either absolute or relative, and
+  the corresponding type of URI object for $os is returned.
+  
+  =item $u = URI::file->new_abs( $filename, [$os] )
+  
+  Same as URI::file->new, but makes sure that the URI returned
+  represents an absolute file name.  If the $filename argument is
+  relative, then the name is resolved relative to the current directory,
+  i.e. this constructor is really the same as:
+  
+    URI::file->new($filename)->abs(URI::file->cwd);
+  
+  =item $u = URI::file->cwd
+  
+  Returns a I<file> URI that represents the current working directory.
+  See L<Cwd>.
+  
+  =back
+  
+  The following methods are supported for I<file> URI (in addition to
+  the common and generic methods described in L<URI>):
+  
+  =over 4
+  
+  =item $u->file( [$os] )
+  
+  Returns a file name.  It maps from the URI name space
+  to the file name space of the indicated operating system.
+  
+  It might return C<undef> if the name can not be represented in the
+  indicated file system.
+  
+  =item $u->dir( [$os] )
+  
+  Some systems use a different form for names of directories than for plain
+  files.  Use this method if you know you want to use the name for
+  a directory.
+  
+  =back
+  
+  The C<URI::file> module can be used to map generic file names to names
+  suitable for the current system.  As such, it can work as a nice
+  replacement for the C<File::Spec> module.  For instance, the following
+  code translates the UNIX-style file name F<Foo/Bar.pm> to a name
+  suitable for the local system:
+  
+    $file = URI::file->new("Foo/Bar.pm", "unix")->file;
+    die "Can't map filename Foo/Bar.pm for $^O" unless defined $file;
+    open(FILE, $file) || die "Can't open '$file': $!";
+    # do something with FILE
+  
+  =head1 MAPPING NOTES
+  
+  Most computer systems today have hierarchically organized file systems.
+  Mapping the names used in these systems to the generic URI syntax
+  allows us to work with relative file URIs that behave as they should
+  when resolved using the generic algorithm for URIs (specified in L<RFC
+  3986|https://www.rfc-editor.org/rfc/rfc3986.html>).
+  Mapping a file name to the generic URI syntax involves mapping
+  the path separator character to "/" and encoding any reserved
+  characters that appear in the path segments of the file name.  If
+  path segments consisting of the strings "." or ".." have a
+  different meaning than what is specified for generic URIs, then these
+  must be encoded as well.
+  
+  If the file system has device, volume or drive specifications as
+  the root of the name space, then it makes sense to map them to the
+  authority field of the generic URI syntax.  This makes sure that
+  relative URIs can not be resolved "above" them, i.e. generally how
+  relative file names work in those systems.
+  
+  Another common use of the authority field is to encode the host on which
+  this file name is valid.  The host name "localhost" is special and
+  generally has the same meaning as a missing or empty authority
+  field.  This use is in conflict with using it as a device
+  specification, but can often be resolved for device specifications
+  having characters not legal in plain host names.
+  
+  File name to URI mapping in normally not one-to-one.  There are
+  usually many URIs that map to any given file name.  For instance, an
+  authority of "localhost" maps the same as a URI with a missing or empty
+  authority.
+  
+  Example 1: The Mac classic (Mac OS 9 and earlier) used ":" as path separator,
+  but not in the same way as a generic URI. ":foo" was a relative name.  "foo:bar"
+  was an absolute name.  Also, path segments could contain the "/" character as well
+  as the literal "." or "..".  So the mapping looks like this:
+  
+    Mac classic           URI
+    ----------            -------------------
+    :foo:bar     <==>     foo/bar
+    :            <==>     ./
+    ::foo:bar    <==>     ../foo/bar
+    :::          <==>     ../../
+    foo:bar      <==>     file:/foo/bar
+    foo:bar:     <==>     file:/foo/bar/
+    ..           <==>     %2E%2E
+    <undef>      <==      /
+    foo/         <==      file:/foo%2F
+    ./foo.txt    <==      file:/.%2Ffoo.txt
+  
+  Note that if you want a relative URL, you *must* begin the path with a :.  Any
+  path that begins with [^:] is treated as absolute.
+  
+  Example 2: The UNIX file system is easy to map, as it uses the same path
+  separator as URIs, has a single root, and segments of "." and ".."
+  have the same meaning.  URIs that have the character "\0" or "/" as
+  part of any path segment can not be turned into valid UNIX file names.
+  
+    UNIX                  URI
+    ----------            ------------------
+    foo/bar      <==>     foo/bar
+    /foo/bar     <==>     file:/foo/bar
+    /foo/bar     <==      file://localhost/foo/bar
+    file:         ==>     ./file:
+    <undef>      <==      file:/fo%00/bar
+    /            <==>     file:/
+  
+  =cut
+  
+  
+  RFC 1630
+  
+     [...]
+  
+     There is clearly a danger of confusion that a link made to a local
+     file should be followed by someone on a different system, with
+     unexpected and possibly harmful results.  Therefore, the convention
+     is that even a "file" URL is provided with a host part.  This allows
+     a client on another system to know that it cannot access the file
+     system, or perhaps to use some other local mechanism to access the
+     file.
+  
+     The special value "localhost" is used in the host field to indicate
+     that the filename should really be used on whatever host one is.
+     This for example allows links to be made to files which are
+     distributed on many machines, or to "your unix local password file"
+     subject of course to consistency across the users of the data.
+  
+     A void host field is equivalent to "localhost".
+  
+  =head1 CONFIGURATION VARIABLES
+  
+  The following configuration variables influence how the class and its
+  methods behave:
+  
+  =over
+  
+  =item %URI::file::OS_CLASS
+  
+  This hash maps OS identifiers to implementation classes.  You might
+  want to add or modify this if you want to plug in your own file
+  handler class.  Normally the keys should match the $^O values in use.
+  
+  If there is no mapping then the "Unix" implementation is used.
+  
+  =item $URI::file::DEFAULT_AUTHORITY
+  
+  This determines what "authority" string to include in absolute file
+  URIs.  It defaults to "".  If you prefer verbose URIs you might set it
+  to be "localhost".
+  
+  Setting this value to C<undef> forces behaviour compatible to URI v1.31
+  and earlier.  In this mode host names in UNC paths and drive letters
+  are mapped to the authority component on Windows, while we produce
+  authority-less URIs on Unix.
+  
+  =back
+  
+  
+  =head1 SEE ALSO
+  
+  L<URI>, L<File::Spec>, L<perlport>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1995-1998,2004 Gisle Aas.
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+URI_FILE
+
+$fatpacked{"URI/file/Base.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_BASE';
+  package URI::file::Base;
+  
+  use strict;
+  use warnings;
+  
+  use URI::Escape ();
+  
+  our $VERSION = '5.21';
+  
+  sub new
+  {
+      my $class = shift;
+      my $path  = shift;
+      $path = "" unless defined $path;
+  
+      my($auth, $escaped_auth, $escaped_path);
+  
+      ($auth, $escaped_auth) = $class->_file_extract_authority($path);
+      ($path, $escaped_path) = $class->_file_extract_path($path);
+  
+      if (defined $auth) {
+  	$auth =~ s,%,%25,g unless $escaped_auth;
+  	$auth =~ s,([/?\#]), URI::Escape::escape_char($1),eg;
+  	$auth = "//$auth";
+  	if (defined $path) {
+  	    $path = "/$path" unless substr($path, 0, 1) eq "/";
+  	} else {
+  	    $path = "";
+  	}
+      } else {
+  	return undef unless defined $path;
+  	$auth = "";
+      }
+  
+      $path =~ s,([%;?]), URI::Escape::escape_char($1),eg unless $escaped_path;
+      $path =~ s/\#/%23/g;
+  
+      my $uri = $auth . $path;
+      $uri = "file:$uri" if substr($uri, 0, 1) eq "/";
+  
+      URI->new($uri, "file");
+  }
+  
+  sub _file_extract_authority
+  {
+      my($class, $path) = @_;
+      return undef unless $class->_file_is_absolute($path);
+      return $URI::file::DEFAULT_AUTHORITY;
+  }
+  
+  sub _file_extract_path
+  {
+      return undef;
+  }
+  
+  sub _file_is_absolute
+  {
+      return 0;
+  }
+  
+  sub _file_is_localhost
+  {
+      shift; # class
+      my $host = lc(shift);
+      return 1 if $host eq "localhost";
+      eval {
+  	require Net::Domain;
+  	lc(Net::Domain::hostfqdn() || '') eq $host ||
+  	lc(Net::Domain::hostname() || '') eq $host;
+      };
+  }
+  
+  sub file
+  {
+      undef;
+  }
+  
+  sub dir
+  {
+      my $self = shift;
+      $self->file(@_);
+  }
+  
+  1;
+URI_FILE_BASE
+
+$fatpacked{"URI/file/FAT.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_FAT';
+  package URI::file::FAT;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Win32';
+  
+  our $VERSION = '5.21';
+  
+  sub fix_path
+  {
+      shift; # class
+      for (@_) {
+  	# turn it into 8.3 names
+  	my @p = map uc, split(/\./, $_, -1);
+  	return if @p > 2;     # more than 1 dot is not allowed
+  	@p = ("") unless @p;  # split bug? (returns nothing when splitting "")
+  	$_ = substr($p[0], 0, 8);
+          if (@p > 1) {
+  	    my $ext = substr($p[1], 0, 3);
+  	    $_ .= ".$ext" if length $ext;
+  	}
+      }
+      1;  # ok
+  }
+  
+  1;
+URI_FILE_FAT
+
+$fatpacked{"URI/file/Mac.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_MAC';
+  package URI::file::Mac;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Base';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.21';
+  
+  sub _file_extract_path
+  {
+      my $class = shift;
+      my $path = shift;
+  
+      my @pre;
+      if ($path =~ s/^(:+)//) {
+  	if (length($1) == 1) {
+  	    @pre = (".") unless length($path);
+  	} else {
+  	    @pre = ("..") x (length($1) - 1);
+  	}
+      } else { #absolute
+  	$pre[0] = "";
+      }
+  
+      my $isdir = ($path =~ s/:$//);
+      $path =~ s,([%/;]), URI::Escape::escape_char($1),eg;
+  
+      my @path = split(/:/, $path, -1);
+      for (@path) {
+  	if ($_ eq "." || $_ eq "..") {
+  	    $_ = "%2E" x length($_);
+  	}
+  	$_ = ".." unless length($_);
+      }
+      push (@path,"") if $isdir;
+      (join("/", @pre, @path), 1);
+  }
+  
+  
+  sub file
+  {
+      my $class = shift;
+      my $uri = shift;
+      my @path;
+  
+      my $auth = $uri->authority;
+      if (defined $auth) {
+  	if (lc($auth) ne "localhost" && $auth ne "") {
+  	    my $u_auth = uri_unescape($auth);
+  	    if (!$class->_file_is_localhost($u_auth)) {
+  		# some other host (use it as volume name)
+  		@path = ("", $auth);
+  		# XXX or just return to make it illegal;
+  	    }
+  	}
+      }
+      my @ps = split("/", $uri->path, -1);
+      shift @ps if @path;
+      push(@path, @ps);
+  
+      my $pre = "";
+      if (!@path) {
+  	return;  # empty path; XXX return ":" instead?
+      } elsif ($path[0] eq "") {
+  	# absolute
+  	shift(@path);
+  	if (@path == 1) {
+  	    return if $path[0] eq "";  # not root directory
+  	    push(@path, "");           # volume only, effectively append ":"
+  	}
+  	@ps = @path;
+  	@path = ();
+          my $part;
+  	for (@ps) {  #fix up "." and "..", including interior, in relatives
+  	    next if $_ eq ".";
+  	    $part = $_ eq ".." ? "" : $_;
+  	    push(@path,$part);
+  	}
+  	if ($ps[-1] eq "..") {  #if this happens, we need another :
+  	    push(@path,"");
+  	}
+  	
+      } else {
+  	$pre = ":";
+  	@ps = @path;
+  	@path = ();
+          my $part;
+  	for (@ps) {  #fix up "." and "..", including interior, in relatives
+  	    next if $_ eq ".";
+  	    $part = $_ eq ".." ? "" : $_;
+  	    push(@path,$part);
+  	}
+  	if ($ps[-1] eq "..") {  #if this happens, we need another :
+  	    push(@path,"");
+  	}
+  	
+      }
+      return unless $pre || @path;
+      for (@path) {
+  	s/;.*//;  # get rid of parameters
+  	#return unless length; # XXX
+  	$_ = uri_unescape($_);
+  	return if /\0/;
+  	return if /:/;  # Should we?
+      }
+      $pre . join(":", @path);
+  }
+  
+  sub dir
+  {
+      my $class = shift;
+      my $path = $class->file(@_);
+      return unless defined $path;
+      $path .= ":" unless $path =~ /:$/;
+      $path;
+  }
+  
+  1;
+URI_FILE_MAC
+
+$fatpacked{"URI/file/OS2.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_OS2';
+  package URI::file::OS2;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Win32';
+  
+  our $VERSION = '5.21';
+  
+  # The Win32 version translates k:/foo to file://k:/foo  (?!)
+  # We add an empty host
+  
+  sub _file_extract_authority
+  {
+      my $class = shift;
+      return $1 if $_[0] =~ s,^\\\\([^\\]+),,;  # UNC
+      return $1 if $_[0] =~ s,^//([^/]+),,;     # UNC too?
+  
+      if ($_[0] =~ m#^[a-zA-Z]{1,2}:#) {	      # allow for ab: drives
+  	return "";
+      }
+      return;
+  }
+  
+  sub file {
+    my $p = &URI::file::Win32::file;
+    return unless defined $p;
+    $p =~ s,\\,/,g;
+    $p;
+  }
+  
+  1;
+URI_FILE_OS2
+
+$fatpacked{"URI/file/QNX.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_QNX';
+  package URI::file::QNX;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Unix';
+  
+  our $VERSION = '5.21';
+  
+  sub _file_extract_path
+  {
+      my($class, $path) = @_;
+      # tidy path
+      $path =~ s,(.)//+,$1/,g; # ^// is correct
+      $path =~ s,(/\.)+/,/,g;
+      $path = "./$path" if $path =~ m,^[^:/]+:,,; # look like "scheme:"
+      $path;
+  }
+  
+  1;
+URI_FILE_QNX
+
+$fatpacked{"URI/file/Unix.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_UNIX';
+  package URI::file::Unix;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Base';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.21';
+  
+  sub _file_extract_path
+  {
+      my($class, $path) = @_;
+  
+      # tidy path
+      $path =~ s,//+,/,g;
+      $path =~ s,(/\.)+/,/,g;
+      $path = "./$path" if $path =~ m,^[^:/]+:,,; # look like "scheme:"
+  
+      return $path;
+  }
+  
+  sub _file_is_absolute {
+      my($class, $path) = @_;
+      return $path =~ m,^/,;
+  }
+  
+  sub file
+  {
+      my $class = shift;
+      my $uri = shift;
+      my @path;
+  
+      my $auth = $uri->authority;
+      if (defined($auth)) {
+  	if (lc($auth) ne "localhost" && $auth ne "") {
+  	    $auth = uri_unescape($auth);
+  	    unless ($class->_file_is_localhost($auth)) {
+  		push(@path, "", "", $auth);
+  	    }
+  	}
+      }
+  
+      my @ps = $uri->path_segments;
+      shift @ps if @path;
+      push(@path, @ps);
+  
+      for (@path) {
+  	# Unix file/directory names are not allowed to contain '\0' or '/'
+  	return undef if /\0/;
+  	return undef if /\//;  # should we really?
+      }
+  
+      return join("/", @path);
+  }
+  
+  1;
+URI_FILE_UNIX
+
+$fatpacked{"URI/file/Win32.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_WIN32';
+  package URI::file::Win32;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Base';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.21';
+  
+  sub _file_extract_authority
+  {
+      my $class = shift;
+  
+      return $class->SUPER::_file_extract_authority($_[0])
+  	if defined $URI::file::DEFAULT_AUTHORITY;
+  
+      return $1 if $_[0] =~ s,^\\\\([^\\]+),,;  # UNC
+      return $1 if $_[0] =~ s,^//([^/]+),,;     # UNC too?
+  
+      if ($_[0] =~ s,^([a-zA-Z]:),,) {
+  	my $auth = $1;
+  	$auth .= "relative" if $_[0] !~ m,^[\\/],;
+  	return $auth;
+      }
+      return undef;
+  }
+  
+  sub _file_extract_path
+  {
+      my($class, $path) = @_;
+      $path =~ s,\\,/,g;
+      #$path =~ s,//+,/,g;
+      $path =~ s,(/\.)+/,/,g;
+  
+      if (defined $URI::file::DEFAULT_AUTHORITY) {
+  	$path =~ s,^([a-zA-Z]:),/$1,;
+      }
+  
+      return $path;
+  }
+  
+  sub _file_is_absolute {
+      my($class, $path) = @_;
+      return $path =~ m,^[a-zA-Z]:, || $path =~ m,^[/\\],;
+  }
+  
+  sub file
+  {
+      my $class = shift;
+      my $uri = shift;
+      my $auth = $uri->authority;
+      my $rel; # is filename relative to drive specified in authority
+      if (defined $auth) {
+          $auth = uri_unescape($auth);
+  	if ($auth =~ /^([a-zA-Z])[:|](relative)?/) {
+  	    $auth = uc($1) . ":";
+  	    $rel++ if $2;
+  	} elsif (lc($auth) eq "localhost") {
+  	    $auth = "";
+  	} elsif (length $auth) {
+  	    $auth = "\\\\" . $auth;  # UNC
+  	}
+      } else {
+  	$auth = "";
+      }
+  
+      my @path = $uri->path_segments;
+      for (@path) {
+  	return undef if /\0/;
+  	return undef if /\//;
+  	#return undef if /\\/;        # URLs with "\" is not uncommon
+      }
+      return undef unless $class->fix_path(@path);
+  
+      my $path = join("\\", @path);
+      $path =~ s/^\\// if $rel;
+      $path = $auth . $path;
+      $path =~ s,^\\([a-zA-Z])[:|],\u$1:,;
+  
+      return $path;
+  }
+  
+  sub fix_path { 1; }
+  
+  1;
+URI_FILE_WIN32
+
+$fatpacked{"URI/ftp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FTP';
+  package URI::ftp;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent qw(URI::_server URI::_userpass);
+  
+  sub default_port { 21 }
+  
+  sub path { shift->path_query(@_) }  # XXX
+  
+  sub _user     { shift->SUPER::user(@_);     }
+  sub _password { shift->SUPER::password(@_); }
+  
+  sub user
+  {
+      my $self = shift;
+      my $user = $self->_user(@_);
+      $user = "anonymous" unless defined $user;
+      $user;
+  }
+  
+  sub password
+  {
+      my $self = shift;
+      my $pass = $self->_password(@_);
+      unless (defined $pass) {
+  	my $user = $self->user;
+  	if ($user eq 'anonymous' || $user eq 'ftp') {
+  	    # anonymous ftp login password
+              # If there is no ftp anonymous password specified
+              # then we'll just use 'anonymous@'
+              # We don't try to send the read e-mail address because:
+              # - We want to remain anonymous
+              # - We want to stop SPAM
+              # - We don't want to let ftp sites to discriminate by the user,
+              #   host, country or ftp client being used.
+  	    $pass = 'anonymous@';
+  	}
+      }
+      $pass;
+  }
+  
+  1;
+URI_FTP
+
+$fatpacked{"URI/gopher.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_GOPHER';
+  package URI::gopher;  # <draft-murali-url-gopher>, Dec 4, 1996
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::_server';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  #  A Gopher URL follows the common internet scheme syntax as defined in 
+  #  section 4.3 of [RFC-URL-SYNTAX]:
+  #
+  #        gopher://<host>[:<port>]/<gopher-path>
+  #
+  #  where
+  #
+  #        <gopher-path> :=  <gopher-type><selector> | 
+  #                          <gopher-type><selector>%09<search> |
+  #                          <gopher-type><selector>%09<search>%09<gopher+_string>
+  #
+  #        <gopher-type> := '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7'
+  #                         '8' | '9' | '+' | 'I' | 'g' | 'T'
+  #
+  #        <selector>    := *pchar     Refer to RFC 1808 [4]
+  #        <search>      := *pchar
+  #        <gopher+_string> := *uchar  Refer to RFC 1738 [3]
+  #        
+  #  If the optional port is omitted, the port defaults to 70. 
+  
+  sub default_port { 70 }
+  
+  sub _gopher_type
+  {
+      my $self = shift;
+      my $path = $self->path_query;
+      $path =~ s,^/,,;
+      my $gtype = $1 if $path =~ s/^(.)//s;
+      if (@_) {
+  	my $new_type = shift;
+  	if (defined($new_type)) {
+  	    Carp::croak("Bad gopher type '$new_type'")
+                 unless length($new_type) == 1;
+  	    substr($path, 0, 0) = $new_type;
+  	    $self->path_query($path);
+  	} else {
+  	    Carp::croak("Can't delete gopher type when selector is present")
+  		if length($path);
+  	    $self->path_query(undef);
+  	}
+      }
+      return $gtype;
+  }
+  
+  sub gopher_type
+  {
+      my $self = shift;
+      my $gtype = $self->_gopher_type(@_);
+      $gtype = "1" unless defined $gtype;
+      $gtype;
+  }
+  
+  sub gtype { goto &gopher_type }  # URI::URL compatibility
+  
+  sub selector { shift->_gfield(0, @_) }
+  sub search   { shift->_gfield(1, @_) }
+  sub string   { shift->_gfield(2, @_) }
+  
+  sub _gfield
+  {
+      my $self = shift;
+      my $fno  = shift;
+      my $path = $self->path_query;
+  
+      # not according to spec., but many popular browsers accept
+      # gopher URLs with a '?' before the search string.
+      $path =~ s/\?/\t/;
+      $path = uri_unescape($path);
+      $path =~ s,^/,,;
+      my $gtype = $1 if $path =~ s,^(.),,s;
+      my @path = split(/\t/, $path, 3);
+      if (@_) {
+  	# modify
+  	my $new = shift;
+  	$path[$fno] = $new;
+  	pop(@path) while @path && !defined($path[-1]);
+  	for (@path) { $_="" unless defined }
+  	$path = $gtype;
+  	$path = "1" unless defined $path;
+  	$path .= join("\t", @path);
+  	$self->path_query($path);
+      }
+      $path[$fno];
+  }
+  
+  1;
+URI_GOPHER
+
+$fatpacked{"URI/http.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_HTTP';
+  package URI::http;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::_server';
+  
+  sub default_port { 80 }
+  
+  sub canonical
+  {
+      my $self = shift;
+      my $other = $self->SUPER::canonical;
+  
+      my $slash_path = defined($other->authority) &&
+          !length($other->path) && !defined($other->query);
+  
+      if ($slash_path) {
+  	$other = $other->clone if $other == $self;
+  	$other->path("/");
+      }
+      $other;
+  }
+  
+  1;
+URI_HTTP
+
+$fatpacked{"URI/https.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_HTTPS';
+  package URI::https;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::http';
+  
+  sub default_port { 443 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_HTTPS
+
+$fatpacked{"URI/icap.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_ICAP';
+  package URI::icap;
+  
+  use strict;
+  use warnings;
+  use base qw(URI::http);
+  
+  our $VERSION = '5.21';
+  
+  sub default_port { return 1344 }
+  
+  1;
+  __END__
+  
+  =head1 NAME
+  
+  URI::icap - URI scheme for ICAP Identifiers
+  
+  =head1 VERSION
+  
+  Version 5.20
+  
+  =head1 SYNOPSIS
+  
+      use URI::icap;
+  
+      my $uri = URI->new('icap://icap-proxy.example.com/');
+  
+  =head1 DESCRIPTION
+  
+  This module implements the C<icap:> URI scheme defined in L<RFC 3507|http://tools.ietf.org/html/rfc3507>, for the L<Internet Content Adaptation Protocol|https://en.wikipedia.org/wiki/Internet_Content_Adaptation_Protocol>.
+  
+  =head1 SUBROUTINES/METHODS
+  
+  This module inherits the behaviour of L<URI::http|URI::http> and overrides the L<default_port|URI#$uri->default_port> method.
+  
+  =head2 default_port
+  
+  The default port for icap servers is 1344
+  
+  =head1 DIAGNOSTICS
+  
+  See L<URI|URI>
+  
+  =head1 CONFIGURATION AND ENVIRONMENT
+  
+  See L<URI|URI#CONFIGURATION-VARIABLES> and L<URI|URI#ENVIRONMENT-VARIABLES>
+  
+  =head1 DEPENDENCIES
+  
+  None
+  
+  =head1 INCOMPATIBILITIES
+  
+  None reported
+  
+  =head1 BUGS AND LIMITATIONS
+  
+  See L<URI|URI#BUGS>
+  
+  =head1 SEE ALSO
+  
+  L<RFC 3507|http://tools.ietf.org/html/rfc3507>
+  
+  =head1 AUTHOR
+  
+  David Dick, C<< <ddick at cpan.org> >>
+  
+  =head1 LICENSE AND COPYRIGHT
+  
+  Copyright 2016 David Dick.
+  
+  This program is free software; you can redistribute it and/or modify it
+  under the terms of either: the GNU General Public License as published
+  by the Free Software Foundation; or the Artistic License.
+  
+  See L<http://dev.perl.org/licenses/> for more information.
+URI_ICAP
+
+$fatpacked{"URI/icaps.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_ICAPS';
+  package URI::icaps;
+  
+  use strict;
+  use warnings;
+  use base qw(URI::icap);
+  
+  our $VERSION = '5.21';
+  
+  sub secure { return 1 }
+  
+  1;
+  __END__
+  
+  =head1 NAME
+  
+  URI::icaps - URI scheme for ICAPS Identifiers
+  
+  =head1 VERSION
+  
+  Version 5.20
+  
+  =head1 SYNOPSIS
+  
+      use URI::icaps;
+  
+      my $uri = URI->new('icaps://icap-proxy.example.com/');
+  
+  =head1 DESCRIPTION
+  
+  This module implements the C<icaps:> URI scheme defined in L<RFC 3507|http://tools.ietf.org/html/rfc3507>, for the L<Internet Content Adaptation Protocol|https://en.wikipedia.org/wiki/Internet_Content_Adaptation_Protocol>.
+  
+  =head1 SUBROUTINES/METHODS
+  
+  This module inherits the behaviour of L<URI::icap|URI::icap> and overrides the L<secure|URI#$uri->secure> method.
+  
+  =head2 secure
+  
+  returns 1 as icaps is a secure protocol
+  
+  =head1 DIAGNOSTICS
+  
+  See L<URI::icap|URI::icap>
+  
+  =head1 CONFIGURATION AND ENVIRONMENT
+  
+  See L<URI::icap|URI::icap>
+  
+  =head1 DEPENDENCIES
+  
+  None
+  
+  =head1 INCOMPATIBILITIES
+  
+  None reported
+  
+  =head1 BUGS AND LIMITATIONS
+  
+  See L<URI::icap|URI::icap>
+  
+  =head1 SEE ALSO
+  
+  L<RFC 3507|http://tools.ietf.org/html/rfc3507>
+  
+  =head1 AUTHOR
+  
+  David Dick, C<< <ddick at cpan.org> >>
+  
+  =head1 LICENSE AND COPYRIGHT
+  
+  Copyright 2016 David Dick.
+  
+  This program is free software; you can redistribute it and/or modify it
+  under the terms of either: the GNU General Public License as published
+  by the Free Software Foundation; or the Artistic License.
+  
+  See L<http://dev.perl.org/licenses/> for more information.
+URI_ICAPS
+
+$fatpacked{"URI/ldap.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_LDAP';
+  # Copyright (c) 1998 Graham Barr <gbarr@pobox.com>. All rights reserved.
+  # This program is free software; you can redistribute it and/or
+  # modify it under the same terms as Perl itself.
+  
+  package URI::ldap;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent qw(URI::_ldap URI::_server);
+  
+  sub default_port { 389 }
+  
+  sub _nonldap_canonical {
+      my $self = shift;
+      $self->URI::_server::canonical(@_);
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::ldap - LDAP Uniform Resource Locators
+  
+  =head1 SYNOPSIS
+  
+    use URI;
+  
+    $uri = URI->new("ldap:$uri_string");
+    $dn     = $uri->dn;
+    $filter = $uri->filter;
+    @attr   = $uri->attributes;
+    $scope  = $uri->scope;
+    %extn   = $uri->extensions;
+    
+    $uri = URI->new("ldap:");  # start empty
+    $uri->host("ldap.itd.umich.edu");
+    $uri->dn("o=University of Michigan,c=US");
+    $uri->attributes(qw(postalAddress));
+    $uri->scope('sub');
+    $uri->filter('(cn=Babs Jensen)');
+    print $uri->as_string,"\n";
+  
+  =head1 DESCRIPTION
+  
+  C<URI::ldap> provides an interface to parse an LDAP URI into its
+  constituent parts and also to build a URI as described in
+  RFC 2255.
+  
+  =head1 METHODS
+  
+  C<URI::ldap> supports all the generic and server methods defined by
+  L<URI>, plus the following.
+  
+  Each of the following methods can be used to set or get the value in
+  the URI. The values are passed in unescaped form.  None of these
+  return undefined values, but elements without a default can be empty.
+  If arguments are given, then a new value is set for the given part
+  of the URI.
+  
+  =over 4
+  
+  =item $uri->dn( [$new_dn] )
+  
+  Sets or gets the I<Distinguished Name> part of the URI.  The DN
+  identifies the base object of the LDAP search.
+  
+  =item $uri->attributes( [@new_attrs] )
+  
+  Sets or gets the list of attribute names which are
+  returned by the search.
+  
+  =item $uri->scope( [$new_scope] )
+  
+  Sets or gets the scope to be used by the search. The value can be one of
+  C<"base">, C<"one"> or C<"sub">. If none is given in the URI then the
+  return value defaults to C<"base">.
+  
+  =item $uri->_scope( [$new_scope] )
+  
+  Same as scope(), but does not default to anything.
+  
+  =item $uri->filter( [$new_filter] )
+  
+  Sets or gets the filter to be used by the search. If none is given in
+  the URI then the return value defaults to C<"(objectClass=*)">.
+  
+  =item $uri->_filter( [$new_filter] )
+  
+  Same as filter(), but does not default to anything.
+  
+  =item $uri->extensions( [$etype => $evalue,...] )
+  
+  Sets or gets the extensions used for the search. The list passed should
+  be in the form etype1 => evalue1, etype2 => evalue2,... This is also
+  the form of list that is returned.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<http://tools.ietf.org/html/rfc2255>
+  
+  =head1 AUTHOR
+  
+  Graham Barr E<lt>F<gbarr@pobox.com>E<gt>
+  
+  Slightly modified by Gisle Aas to fit into the URI distribution.
+  
+  =head1 COPYRIGHT
+  
+  Copyright (c) 1998 Graham Barr. All rights reserved. This program is
+  free software; you can redistribute it and/or modify it under the same
+  terms as Perl itself.
+  
+  =cut
+URI_LDAP
+
+$fatpacked{"URI/ldapi.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_LDAPI';
+  package URI::ldapi;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent qw(URI::_ldap URI::_generic);
+  
+  use URI::Escape ();
+  
+  sub un_path {
+      my $self = shift;
+      my $old = URI::Escape::uri_unescape($self->authority);
+      if (@_) {
+  	my $p = shift;
+  	$p =~ s/:/%3A/g;
+  	$p =~ s/\@/%40/g;
+  	$self->authority($p);
+      }
+      return $old;
+  }
+  
+  sub _nonldap_canonical {
+      my $self = shift;
+      $self->URI::_generic::canonical(@_);
+  }
+  
+  1;
+URI_LDAPI
+
+$fatpacked{"URI/ldaps.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_LDAPS';
+  package URI::ldaps;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::ldap';
+  
+  sub default_port { 636 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_LDAPS
+
+$fatpacked{"URI/mailto.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_MAILTO';
+  package URI::mailto;  # RFC 2368
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent qw(URI URI::_query);
+  
+  sub to
+  {
+      my $self = shift;
+      my @old = $self->headers;
+      if (@_) {
+  	my @new = @old;
+  	# get rid of any other to: fields
+  	for (my $i = 0; $i < @new; $i += 2) {
+  	    if (lc($new[$i] || '') eq "to") {
+  		splice(@new, $i, 2);
+  		redo;
+  	    }
+  	}
+  
+  	my $to = shift;
+  	$to = "" unless defined $to;
+  	unshift(@new, "to" => $to);
+  	$self->headers(@new);
+      }
+      return unless defined wantarray;
+  
+      my @to;
+      while (@old) {
+  	my $h = shift @old;
+  	my $v = shift @old;
+  	push(@to, $v) if lc($h) eq "to";
+      }
+      join(",", @to);
+  }
+  
+  
+  sub headers 
+  {
+      my $self = shift;
+  
+      # The trick is to just treat everything as the query string...
+      my $opaque = "to=" . $self->opaque;
+      $opaque =~ s/\?/&/;
+  
+      if (@_) {
+  	my @new = @_;
+  
+  	# strip out any "to" fields
+  	my @to;
+  	for (my $i=0; $i < @new; $i += 2) {
+  	    if (lc($new[$i] || '') eq "to") {
+  		push(@to, (splice(@new, $i, 2))[1]);  # remove header
+  		redo;
+  	    }
+  	}
+  
+  	my $new = join(",",@to);
+  	$new =~ s/%/%25/g;
+  	$new =~ s/\?/%3F/g;
+  	$self->opaque($new);
+  	$self->query_form(@new) if @new;
+      }
+      return unless defined wantarray;
+  
+      # I am lazy today...
+      URI->new("mailto:?$opaque")->query_form;
+  }
+  
+  # https://datatracker.ietf.org/doc/html/rfc6068#section-5 requires 
+  # plus signs (+) not to be turned into spaces
+  sub query_form 
+  {
+      my $self   = shift;
+      my @fields = $self->SUPER::query_form(@_);
+      for ( my $i = 0 ; $i < @fields ; $i += 2 ) {
+          if ( $fields[0] eq 'to' ) {
+              $fields[1] =~ s/ /+/g;
+              last;
+          }
+      }
+      return @fields;
+  }
+  
+  1;
+URI_MAILTO
+
+$fatpacked{"URI/mms.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_MMS';
+  package URI::mms;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::http';
+  
+  sub default_port { 1755 }
+  
+  1;
+URI_MMS
+
+$fatpacked{"URI/news.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_NEWS';
+  package URI::news;  # draft-gilman-news-url-01
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::_server';
+  
+  use URI::Escape qw(uri_unescape);
+  use Carp ();
+  
+  sub default_port { 119 }
+  
+  #   newsURL      =  scheme ":" [ news-server ] [ refbygroup | message ]
+  #   scheme       =  "news" | "snews" | "nntp"
+  #   news-server  =  "//" server "/"
+  #   refbygroup   = group [ "/" messageno [ "-" messageno ] ]
+  #   message      = local-part "@" domain
+  
+  sub _group
+  {
+      my $self = shift;
+      my $old = $self->path;
+      if (@_) {
+  	my($group,$from,$to) = @_;
+  	if ($group =~ /\@/) {
+              $group =~ s/^<(.*)>$/$1/;  # "<" and ">" should not be part of it
+  	}
+  	$group =~ s,%,%25,g;
+  	$group =~ s,/,%2F,g;
+  	my $path = $group;
+  	if (defined $from) {
+  	    $path .= "/$from";
+  	    $path .= "-$to" if defined $to;
+  	}
+  	$self->path($path);
+      }
+  
+      $old =~ s,^/,,;
+      if ($old !~ /\@/ && $old =~ s,/(.*),, && wantarray) {
+  	my $extra = $1;
+  	return (uri_unescape($old), split(/-/, $extra));
+      }
+      uri_unescape($old);
+  }
+  
+  
+  sub group
+  {
+      my $self = shift;
+      if (@_) {
+  	Carp::croak("Group name can't contain '\@'") if $_[0] =~ /\@/;
+      }
+      my @old = $self->_group(@_);
+      return if $old[0] =~ /\@/;
+      wantarray ? @old : $old[0];
+  }
+  
+  sub message
+  {
+      my $self = shift;
+      if (@_) {
+  	Carp::croak("Message must contain '\@'") unless $_[0] =~ /\@/;
+      }
+      my $old = $self->_group(@_);
+      return undef unless $old =~ /\@/;
+      return $old;
+  }
+  
+  1;
+URI_NEWS
+
+$fatpacked{"URI/nntp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_NNTP';
+  package URI::nntp;  # draft-gilman-news-url-01
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::news';
+  
+  1;
+URI_NNTP
+
+$fatpacked{"URI/nntps.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_NNTPS';
+  package URI::nntps;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::nntp';
+  
+  sub default_port { 563 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_NNTPS
+
+$fatpacked{"URI/pop.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_POP';
+  package URI::pop;   # RFC 2384
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::_server';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  sub default_port { 110 }
+  
+  #pop://<user>;auth=<auth>@<host>:<port>
+  
+  sub user
+  {
+      my $self = shift;
+      my $old = $self->userinfo;
+  
+      if (@_) {
+  	my $new_info = $old;
+  	$new_info = "" unless defined $new_info;
+  	$new_info =~ s/^[^;]*//;
+  
+  	my $new = shift;
+  	if (!defined($new) && !length($new_info)) {
+  	    $self->userinfo(undef);
+  	} else {
+  	    $new = "" unless defined $new;
+  	    $new =~ s/%/%25/g;
+  	    $new =~ s/;/%3B/g;
+  	    $self->userinfo("$new$new_info");
+  	}
+      }
+  
+      return undef unless defined $old;
+      $old =~ s/;.*//;
+      return uri_unescape($old);
+  }
+  
+  sub auth
+  {
+      my $self = shift;
+      my $old = $self->userinfo;
+  
+      if (@_) {
+  	my $new = $old;
+  	$new = "" unless defined $new;
+  	$new =~ s/(^[^;]*)//;
+  	my $user = $1;
+  	$new =~ s/;auth=[^;]*//i;
+  
+  	
+  	my $auth = shift;
+  	if (defined $auth) {
+  	    $auth =~ s/%/%25/g;
+  	    $auth =~ s/;/%3B/g;
+  	    $new = ";AUTH=$auth$new";
+  	}
+  	$self->userinfo("$user$new");
+  	
+      }
+  
+      return undef unless defined $old;
+      $old =~ s/^[^;]*//;
+      return uri_unescape($1) if $old =~ /;auth=(.*)/i;
+      return;
+  }
+  
+  1;
+URI_POP
+
+$fatpacked{"URI/rlogin.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_RLOGIN';
+  package URI::rlogin;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::_login';
+  
+  sub default_port { 513 }
+  
+  1;
+URI_RLOGIN
+
+$fatpacked{"URI/rsync.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_RSYNC';
+  package URI::rsync;  # http://rsync.samba.org/
+  
+  # rsync://[USER@]HOST[:PORT]/SRC
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent qw(URI::_server URI::_userpass);
+  
+  sub default_port { 873 }
+  
+  1;
+URI_RSYNC
+
+$fatpacked{"URI/rtsp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_RTSP';
+  package URI::rtsp;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::http';
+  
+  sub default_port { 554 }
+  
+  1;
+URI_RTSP
+
+$fatpacked{"URI/rtspu.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_RTSPU';
+  package URI::rtspu;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::rtsp';
+  
+  sub default_port { 554 }
+  
+  1;
+URI_RTSPU
+
+$fatpacked{"URI/sftp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SFTP';
+  package URI::sftp;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::ssh';
+  
+  our $VERSION = '5.21';
+  
+  1;
+URI_SFTP
+
+$fatpacked{"URI/sip.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SIP';
+  #
+  # Written by Ryan Kereliuk <ryker@ryker.org>.  This file may be
+  # distributed under the same terms as Perl itself.
+  #
+  # The RFC 3261 sip URI is <scheme>:<authority>;<params>?<query>.
+  #
+  
+  package URI::sip;
+  
+  use strict;
+  use warnings;
+  
+  use parent qw(URI::_server URI::_userpass);
+  
+  use URI::Escape ();
+  
+  our $VERSION = '5.21';
+  
+  sub default_port { 5060 }
+  
+  sub authority
+  {
+      my $self = shift;
+      $$self =~ m,^($URI::scheme_re:)?([^;?]*)(.*)$,os or die;
+      my $start = $1;
+      my $authoritystr = $2;
+      my $rest = $3;
+  
+      if (@_) {
+          $authoritystr = shift;
+          $authoritystr =~ s/([^$URI::uric])/ URI::Escape::escape_char($1)/ego;
+          $$self = $start . $authoritystr . $rest;
+      }
+      return $authoritystr;
+  }
+  
+  sub params_form
+  {
+      my $self = shift;
+      $$self =~ m,^((?:$URI::scheme_re:)?)(?:([^;?]*))?(;[^?]*)?(.*)$,os or die;
+      my $start = $1 . $2;
+      my $paramstr = $3;
+      my $rest = $4;
+  
+      if (@_) {
+  	my @paramarr;
+  	for (my $i = 0; $i < @_; $i += 2) {
+  	    push(@paramarr, "$_[$i]=$_[$i+1]");
+  	}
+  	$paramstr = join(";", @paramarr);
+  	$$self = $start . ";" . $paramstr . $rest;
+      }
+      $paramstr =~ s/^;//o;
+      return split(/[;=]/, $paramstr);
+  }
+  
+  sub params
+  {
+      my $self = shift;
+      $$self =~ m,^((?:$URI::scheme_re:)?)(?:([^;?]*))?(;[^?]*)?(.*)$,os or die;
+      my $start = $1 . $2;
+      my $paramstr = $3;
+      my $rest = $4;
+  
+      if (@_) {
+          $paramstr = shift; 
+          $$self = $start . ";" . $paramstr . $rest;
+      }
+      $paramstr =~ s/^;//o;
+      return $paramstr;
+  }
+  
+  # Inherited methods that make no sense for a SIP URI.
+  sub path {}
+  sub path_query {}
+  sub path_segments {}
+  sub abs { shift }
+  sub rel { shift }
+  sub query_keywords {}
+  
+  1;
+URI_SIP
+
+$fatpacked{"URI/sips.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SIPS';
+  package URI::sips;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::sip';
+  
+  sub default_port { 5061 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_SIPS
+
+$fatpacked{"URI/snews.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SNEWS';
+  package URI::snews;  # draft-gilman-news-url-01
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::news';
+  
+  sub default_port { 563 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_SNEWS
+
+$fatpacked{"URI/ssh.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SSH';
+  package URI::ssh;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::_login';
+  
+  # ssh://[USER@]HOST[:PORT]/SRC
+  
+  sub default_port { 22 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_SSH
+
+$fatpacked{"URI/telnet.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_TELNET';
+  package URI::telnet;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::_login';
+  
+  sub default_port { 23 }
+  
+  1;
+URI_TELNET
+
+$fatpacked{"URI/tn3270.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_TN3270';
+  package URI::tn3270;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::_login';
+  
+  sub default_port { 23 }
+  
+  1;
+URI_TN3270
+
+$fatpacked{"URI/urn.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_URN';
+  package URI::urn;  # RFC 2141
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI';
+  
+  use Carp qw(carp);
+  
+  my %implementor;
+  my %require_attempted;
+  
+  sub _init {
+      my $class = shift;
+      my $self = $class->SUPER::_init(@_);
+      my $nid = $self->nid;
+  
+      my $impclass = $implementor{$nid};
+      return $impclass->_urn_init($self, $nid) if $impclass;
+  
+      $impclass = "URI::urn";
+      if ($nid =~ /^[A-Za-z\d][A-Za-z\d\-]*\z/) {
+  	my $id = $nid;
+  	# make it a legal perl identifier
+  	$id =~ s/-/_/g;
+  	$id = "_$id" if $id =~ /^\d/;
+  
+  	$impclass = "URI::urn::$id";
+  	no strict 'refs';
+  	unless (@{"${impclass}::ISA"}) {
+              if (not exists $require_attempted{$impclass}) {
+                  # Try to load it
+                  my $_old_error = $@;
+                  eval "require $impclass";
+                  die $@ if $@ && $@ !~ /Can\'t locate.*in \@INC/;
+                  $@ = $_old_error;
+              }
+  	    $impclass = "URI::urn" unless @{"${impclass}::ISA"};
+  	}
+      }
+      else {
+  	carp("Illegal namespace identifier '$nid' for URN '$self'") if $^W;
+      }
+      $implementor{$nid} = $impclass;
+  
+      return $impclass->_urn_init($self, $nid);
+  }
+  
+  sub _urn_init {
+      my($class, $self, $nid) = @_;
+      bless $self, $class;
+  }
+  
+  sub _nid {
+      my $self = shift;
+      my $opaque = $self->opaque;
+      if (@_) {
+  	my $v = $opaque;
+  	my $new = shift;
+  	$v =~ s/[^:]*/$new/;
+  	$self->opaque($v);
+  	# XXX possible rebless
+      }
+      $opaque =~ s/:.*//s;
+      return $opaque;
+  }
+  
+  sub nid {  # namespace identifier
+      my $self = shift;
+      my $nid = $self->_nid(@_);
+      $nid = lc($nid) if defined($nid);
+      return $nid;
+  }
+  
+  sub nss {  # namespace specific string
+      my $self = shift;
+      my $opaque = $self->opaque;
+      if (@_) {
+  	my $v = $opaque;
+  	my $new = shift;
+  	if (defined $new) {
+  	    $v =~ s/(:|\z).*/:$new/;
+  	}
+  	else {
+  	    $v =~ s/:.*//s;
+  	}
+  	$self->opaque($v);
+      }
+      return undef unless $opaque =~ s/^[^:]*://;
+      return $opaque;
+  }
+  
+  sub canonical {
+      my $self = shift;
+      my $nid = $self->_nid;
+      my $new = $self->SUPER::canonical;
+      return $new if $nid !~ /[A-Z]/ || $nid =~ /%/;
+      $new = $new->clone if $new == $self;
+      $new->nid(lc($nid));
+      return $new;
+  }
+  
+  1;
+URI_URN
+
+$fatpacked{"URI/urn/isbn.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_URN_ISBN';
+  package URI::urn::isbn;  # RFC 3187
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::urn';
+  
+  use Carp qw(carp);
+  
+  BEGIN {
+      require Business::ISBN;
+  
+      local $^W = 0; # don't warn about dev versions, perl5.004 style
+      warn "Using Business::ISBN version " . Business::ISBN->VERSION .
+          " which is deprecated.\nUpgrade to Business::ISBN version 3.005\n"
+          if Business::ISBN->VERSION < 3.005;
+      }
+  
+  sub _isbn {
+      my $nss = shift;
+      $nss = $nss->nss if ref($nss);
+      my $isbn = Business::ISBN->new($nss);
+      $isbn = undef if $isbn && !$isbn->is_valid;
+      return $isbn;
+  }
+  
+  sub _nss_isbn {
+      my $self = shift;
+      my $nss = $self->nss(@_);
+      my $isbn = _isbn($nss);
+      $isbn = $isbn->as_string if $isbn;
+      return($nss, $isbn);
+  }
+  
+  sub isbn {
+      my $self = shift;
+      my $isbn;
+      (undef, $isbn) = $self->_nss_isbn(@_);
+      return $isbn;
+  }
+  
+  sub isbn_publisher_code {
+      my $isbn = shift->_isbn || return undef;
+      return $isbn->publisher_code;
+  }
+  
+  BEGIN {
+  my $group_method = do {
+      local $^W = 0; # don't warn about dev versions, perl5.004 style
+      Business::ISBN->VERSION >= 2 ? 'group_code' : 'country_code';
+      };
+  
+  sub isbn_group_code {
+      my $isbn = shift->_isbn || return undef;
+      return $isbn->$group_method;
+  }
+  }
+  
+  sub isbn_country_code {
+      my $name = (caller(0))[3]; $name =~ s/.*:://;
+      carp "$name is DEPRECATED. Use isbn_group_code instead";
+  
+      no strict 'refs';
+      &isbn_group_code;
+  }
+  
+  BEGIN {
+  my $isbn13_method = do {
+      local $^W = 0; # don't warn about dev versions, perl5.004 style
+      Business::ISBN->VERSION >= 2 ? 'as_isbn13' : 'as_ean';
+      };
+  
+  sub isbn13 {
+      my $isbn = shift->_isbn || return undef;
+  
+      # Business::ISBN 1.x didn't put hyphens in the EAN, and it was just a string
+      # Business::ISBN 2.0 doesn't do EAN, but it does ISBN-13 objects
+      #   and it uses the hyphens, so call as_string with an empty anon array
+      # or, adjust the test and features to say that it comes out with hyphens.
+      my $thingy = $isbn->$isbn13_method;
+      return eval { $thingy->can( 'as_string' ) } ? $thingy->as_string([]) : $thingy;
+  }
+  }
+  
+  sub isbn_as_ean {
+      my $name = (caller(0))[3]; $name =~ s/.*:://;
+      carp "$name is DEPRECATED. Use isbn13 instead";
+  
+      no strict 'refs';
+      &isbn13;
+  }
+  
+  sub canonical {
+      my $self = shift;
+      my($nss, $isbn) = $self->_nss_isbn;
+      my $new = $self->SUPER::canonical;
+      return $new unless $nss && $isbn && $nss ne $isbn;
+      $new = $new->clone if $new == $self;
+      $new->nss($isbn);
+      return $new;
+  }
+  
+  1;
+URI_URN_ISBN
+
+$fatpacked{"URI/urn/oid.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_URN_OID';
+  package URI::urn::oid;  # RFC 2061
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.21';
+  
+  use parent 'URI::urn';
+  
+  sub oid {
+      my $self = shift;
+      my $old = $self->nss;
+      if (@_) {
+  	$self->nss(join(".", @_));
+      }
+      return split(/\./, $old) if wantarray;
+      return $old;
+  }
+  
+  1;
+URI_URN_OID
 
 $fatpacked{"WWW/Form/UrlEncoded.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'WWW_FORM_URLENCODED';
   package WWW::Form::UrlEncoded;
@@ -34017,8 +38164,8 @@ WWW_FORM_URLENCODED_PP
 
 $fatpacked{"if.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'IF';
   package if;
-  
-  $VERSION = '0.0608';
+  use strict;
+  our $VERSION = '0.0610';
   
   sub work {
     my $method = shift() ? 'import' : 'unimport';
@@ -34110,7 +38257,7 @@ $fatpacked{"if.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'IF';
   
   =head1 SEE ALSO
   
-  L<Module::Requires> can be used to conditionally load one or modules,
+  L<Module::Requires> can be used to conditionally load one or more modules,
   with constraints based on the version of the module.
   Unlike C<if> though, L<Module::Requires> is not a core module.
   
