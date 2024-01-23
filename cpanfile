@@ -33,6 +33,7 @@ feature fatpack => sub {
     requires 'HTTP::Parser';
     requires 'HTTP::Tiny';
     requires 'Module::Load';
+    requires 'Text::Unidecode';
     requires 'Thrall', '0.0402';
     requires 'Time::Local';
     requires 'Try::Tiny';

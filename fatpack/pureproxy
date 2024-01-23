@@ -9637,35 +9637,35 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   #pod This constructor returns a new HTTP::Tiny object.  Valid attributes include:
   #pod
   #pod =for :list
-  #pod * C<agent> — A user-agent string (defaults to 'HTTP-Tiny/$VERSION'). If
-  #pod   C<agent> — ends in a space character, the default user-agent string is
+  #pod * C<agent> -- A user-agent string (defaults to 'HTTP-Tiny/$VERSION'). If
+  #pod   C<agent> -- ends in a space character, the default user-agent string is
   #pod   appended.
-  #pod * C<cookie_jar> — An instance of L<HTTP::CookieJar> — or equivalent class
+  #pod * C<cookie_jar> -- An instance of L<HTTP::CookieJar> -- or equivalent class
   #pod   that supports the C<add> and C<cookie_header> methods
-  #pod * C<default_headers> — A hashref of default headers to apply to requests
-  #pod * C<local_address> — The local IP address to bind to
-  #pod * C<keep_alive> — Whether to reuse the last connection (if for the same
+  #pod * C<default_headers> -- A hashref of default headers to apply to requests
+  #pod * C<local_address> -- The local IP address to bind to
+  #pod * C<keep_alive> -- Whether to reuse the last connection (if for the same
   #pod   scheme, host and port) (defaults to 1)
-  #pod * C<max_redirect> — Maximum number of redirects allowed (defaults to 5)
-  #pod * C<max_size> — Maximum response size in bytes (only when not using a data
+  #pod * C<max_redirect> -- Maximum number of redirects allowed (defaults to 5)
+  #pod * C<max_size> -- Maximum response size in bytes (only when not using a data
   #pod   callback).  If defined, requests with responses larger than this will return
   #pod   a 599 status code.
-  #pod * C<http_proxy> — URL of a proxy server to use for HTTP connections
-  #pod   (default is C<$ENV{http_proxy}> — if set)
-  #pod * C<https_proxy> — URL of a proxy server to use for HTTPS connections
-  #pod   (default is C<$ENV{https_proxy}> — if set)
-  #pod * C<proxy> — URL of a generic proxy server for both HTTP and HTTPS
-  #pod   connections (default is C<$ENV{all_proxy}> — if set)
-  #pod * C<no_proxy> — List of domain suffixes that should not be proxied.  Must
+  #pod * C<http_proxy> -- URL of a proxy server to use for HTTP connections
+  #pod   (default is C<$ENV{http_proxy}> -- if set)
+  #pod * C<https_proxy> -- URL of a proxy server to use for HTTPS connections
+  #pod   (default is C<$ENV{https_proxy}> -- if set)
+  #pod * C<proxy> -- URL of a generic proxy server for both HTTP and HTTPS
+  #pod   connections (default is C<$ENV{all_proxy}> -- if set)
+  #pod * C<no_proxy> -- List of domain suffixes that should not be proxied.  Must
   #pod   be a comma-separated string or an array reference. (default is
-  #pod   C<$ENV{no_proxy}> —)
-  #pod * C<timeout> — Request timeout in seconds (default is 60) If a socket open,
+  #pod   C<$ENV{no_proxy}> --)
+  #pod * C<timeout> -- Request timeout in seconds (default is 60) If a socket open,
   #pod   read or write takes longer than the timeout, the request response status code
   #pod   will be 599.
-  #pod * C<verify_SSL> — A boolean that indicates whether to validate the TLS/SSL
-  #pod   certificate of an C<https> — connection (default is true). Changed from false
+  #pod * C<verify_SSL> -- A boolean that indicates whether to validate the TLS/SSL
+  #pod   certificate of an C<https> -- connection (default is true). Changed from false
   #pod   to true in version 0.083.
-  #pod * C<SSL_options> — A hashref of C<SSL_*> — options to pass through to
+  #pod * C<SSL_options> -- A hashref of C<SSL_*> -- options to pass through to
   #pod   L<IO::Socket::SSL>
   #pod * C<$ENV{PERL_HTTP_TINY_SSL_INSECURE_BY_DEFAULT}> - Changes the default
   #pod   certificate verification behavior to not check server identity if set to 1.
@@ -9991,20 +9991,20 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   #pod Valid options are:
   #pod
   #pod =for :list
-  #pod * C<headers> —
+  #pod * C<headers> --
   #pod     A hashref containing headers to include with the request.  If the value for
   #pod     a header is an array reference, the header will be output multiple times with
   #pod     each value in the array.  These headers over-write any default headers.
-  #pod * C<content> —
+  #pod * C<content> --
   #pod     A scalar to include as the body of the request OR a code reference
   #pod     that will be called iteratively to produce the body of the request
-  #pod * C<trailer_callback> —
+  #pod * C<trailer_callback> --
   #pod     A code reference that will be called if it exists to provide a hashref
   #pod     of trailing headers (only used with chunked transfer-encoding)
-  #pod * C<data_callback> —
+  #pod * C<data_callback> --
   #pod     A code reference that will be called for each chunks of the response
   #pod     body received.
-  #pod * C<peer> —
+  #pod * C<peer> --
   #pod     Override host resolution and force all connections to go only to a
   #pod     specific peer address, regardless of the URL of the request.  This will
   #pod     include any redirections!  This options should be used with extreme
@@ -10038,21 +10038,21 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   #pod will have the following keys:
   #pod
   #pod =for :list
-  #pod * C<success> —
+  #pod * C<success> --
   #pod     Boolean indicating whether the operation returned a 2XX status code
-  #pod * C<url> —
+  #pod * C<url> --
   #pod     URL that provided the response. This is the URL of the request unless
   #pod     there were redirections, in which case it is the last URL queried
   #pod     in a redirection chain
-  #pod * C<status> —
+  #pod * C<status> --
   #pod     The HTTP status code of the response
-  #pod * C<reason> —
+  #pod * C<reason> --
   #pod     The response phrase returned by the server
-  #pod * C<content> —
+  #pod * C<content> --
   #pod     The body of the response.  If the response does not have any content
   #pod     or if a data callback is provided to consume the response body,
   #pod     this will be the empty string
-  #pod * C<headers> —
+  #pod * C<headers> --
   #pod     A hashref of header fields.  All header field names will be normalized
   #pod     to be lower case. If a header is repeated, the value will be an arrayref;
   #pod     it will otherwise be a scalar string containing the value
@@ -11394,59 +11394,59 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =item *
   
-  C<agent> — A user-agent string (defaults to 'HTTP-Tiny/$VERSION'). If C<agent> — ends in a space character, the default user-agent string is appended.
+  C<agent> -- A user-agent string (defaults to 'HTTP-Tiny/$VERSION'). If C<agent> -- ends in a space character, the default user-agent string is appended.
   
   =item *
   
-  C<cookie_jar> — An instance of L<HTTP::CookieJar> — or equivalent class that supports the C<add> and C<cookie_header> methods
+  C<cookie_jar> -- An instance of L<HTTP::CookieJar> -- or equivalent class that supports the C<add> and C<cookie_header> methods
   
   =item *
   
-  C<default_headers> — A hashref of default headers to apply to requests
+  C<default_headers> -- A hashref of default headers to apply to requests
   
   =item *
   
-  C<local_address> — The local IP address to bind to
+  C<local_address> -- The local IP address to bind to
   
   =item *
   
-  C<keep_alive> — Whether to reuse the last connection (if for the same scheme, host and port) (defaults to 1)
+  C<keep_alive> -- Whether to reuse the last connection (if for the same scheme, host and port) (defaults to 1)
   
   =item *
   
-  C<max_redirect> — Maximum number of redirects allowed (defaults to 5)
+  C<max_redirect> -- Maximum number of redirects allowed (defaults to 5)
   
   =item *
   
-  C<max_size> — Maximum response size in bytes (only when not using a data callback).  If defined, requests with responses larger than this will return a 599 status code.
+  C<max_size> -- Maximum response size in bytes (only when not using a data callback).  If defined, requests with responses larger than this will return a 599 status code.
   
   =item *
   
-  C<http_proxy> — URL of a proxy server to use for HTTP connections (default is C<$ENV{http_proxy}> — if set)
+  C<http_proxy> -- URL of a proxy server to use for HTTP connections (default is C<$ENV{http_proxy}> -- if set)
   
   =item *
   
-  C<https_proxy> — URL of a proxy server to use for HTTPS connections (default is C<$ENV{https_proxy}> — if set)
+  C<https_proxy> -- URL of a proxy server to use for HTTPS connections (default is C<$ENV{https_proxy}> -- if set)
   
   =item *
   
-  C<proxy> — URL of a generic proxy server for both HTTP and HTTPS connections (default is C<$ENV{all_proxy}> — if set)
+  C<proxy> -- URL of a generic proxy server for both HTTP and HTTPS connections (default is C<$ENV{all_proxy}> -- if set)
   
   =item *
   
-  C<no_proxy> — List of domain suffixes that should not be proxied.  Must be a comma-separated string or an array reference. (default is C<$ENV{no_proxy}> —)
+  C<no_proxy> -- List of domain suffixes that should not be proxied.  Must be a comma-separated string or an array reference. (default is C<$ENV{no_proxy}> --)
   
   =item *
   
-  C<timeout> — Request timeout in seconds (default is 60) If a socket open, read or write takes longer than the timeout, the request response status code will be 599.
+  C<timeout> -- Request timeout in seconds (default is 60) If a socket open, read or write takes longer than the timeout, the request response status code will be 599.
   
   =item *
   
-  C<verify_SSL> — A boolean that indicates whether to validate the TLS/SSL certificate of an C<https> — connection (default is true). Changed from false to true in version 0.083.
+  C<verify_SSL> -- A boolean that indicates whether to validate the TLS/SSL certificate of an C<https> -- connection (default is true). Changed from false to true in version 0.083.
   
   =item *
   
-  C<SSL_options> — A hashref of C<SSL_*> — options to pass through to L<IO::Socket::SSL>
+  C<SSL_options> -- A hashref of C<SSL_*> -- options to pass through to L<IO::Socket::SSL>
   
   =item *
   
@@ -11554,23 +11554,23 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =item *
   
-  C<headers> — A hashref containing headers to include with the request.  If the value for a header is an array reference, the header will be output multiple times with each value in the array.  These headers over-write any default headers.
+  C<headers> -- A hashref containing headers to include with the request.  If the value for a header is an array reference, the header will be output multiple times with each value in the array.  These headers over-write any default headers.
   
   =item *
   
-  C<content> — A scalar to include as the body of the request OR a code reference that will be called iteratively to produce the body of the request
+  C<content> -- A scalar to include as the body of the request OR a code reference that will be called iteratively to produce the body of the request
   
   =item *
   
-  C<trailer_callback> — A code reference that will be called if it exists to provide a hashref of trailing headers (only used with chunked transfer-encoding)
+  C<trailer_callback> -- A code reference that will be called if it exists to provide a hashref of trailing headers (only used with chunked transfer-encoding)
   
   =item *
   
-  C<data_callback> — A code reference that will be called for each chunks of the response body received.
+  C<data_callback> -- A code reference that will be called for each chunks of the response body received.
   
   =item *
   
-  C<peer> — Override host resolution and force all connections to go only to a specific peer address, regardless of the URL of the request.  This will include any redirections!  This options should be used with extreme caution (e.g. debugging or very special circumstances). It can be given as either a scalar or a code reference that will receive the hostname and whose response will be taken as the address.
+  C<peer> -- Override host resolution and force all connections to go only to a specific peer address, regardless of the URL of the request.  This will include any redirections!  This options should be used with extreme caution (e.g. debugging or very special circumstances). It can be given as either a scalar or a code reference that will receive the hostname and whose response will be taken as the address.
   
   =back
   
@@ -11603,27 +11603,27 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =item *
   
-  C<success> — Boolean indicating whether the operation returned a 2XX status code
+  C<success> -- Boolean indicating whether the operation returned a 2XX status code
   
   =item *
   
-  C<url> — URL that provided the response. This is the URL of the request unless there were redirections, in which case it is the last URL queried in a redirection chain
+  C<url> -- URL that provided the response. This is the URL of the request unless there were redirections, in which case it is the last URL queried in a redirection chain
   
   =item *
   
-  C<status> — The HTTP status code of the response
+  C<status> -- The HTTP status code of the response
   
   =item *
   
-  C<reason> — The response phrase returned by the server
+  C<reason> -- The response phrase returned by the server
   
   =item *
   
-  C<content> — The body of the response.  If the response does not have any content or if a data callback is provided to consume the response body, this will be the empty string
+  C<content> -- The body of the response.  If the response does not have any content or if a data callback is provided to consume the response body, this will be the empty string
   
   =item *
   
-  C<headers> — A hashref of header fields.  All header field names will be normalized to be lower case. If a header is repeated, the value will be an arrayref; it will otherwise be a scalar string containing the value
+  C<headers> -- A hashref of header fields.  All header field names will be normalized to be lower case. If a header is repeated, the value will be an arrayref; it will otherwise be a scalar string containing the value
   
   =item *
   
@@ -12001,7 +12001,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =head1 CONTRIBUTORS
   
-  =for stopwords Alan Gardner Alessandro Ghedini A. Sinan Unur Brad Gilbert brian m. carlson Chris Nehren Weyl Claes Jakobsson Clinton Gormley Craig Berry David Golden Mitchell Dean Pearce Edward Zborowski Felipe Gasper Graham Knop Greg Kennedy James E Keenan Raspass Jeremy Mates Jess Robinson Karen Etheridge Lukas Eklund Martin J. Evans Martin-Louis Bright Matthew Horsfall Michael R. Davis Mike Doherty Nicolas Rochelemagne Olaf Alders Olivier Mengué Petr Písař sanjay-cpu Serguei Trouchelle Shoichi Kaji SkyMarshal Sören Kornetzki Steve Grazzini Stig Palmquist Syohei YOSHIDA Tatsuhiko Miyagawa Tom Hukins Tony Cook Xavier Guimard
+  =for stopwords Alan Gardner Alessandro Ghedini A. Sinan Unur Brad Gilbert brian m. carlson Chris Nehren Weyl Claes Jakobsson Clinton Gormley Craig Berry David Golden Mitchell Dean Pearce Edward Zborowski Felipe Gasper Graham Knop Greg Kennedy James E Keenan Raspass Jeremy Mates Jess Robinson Karen Etheridge Lukas Eklund Martin J. Evans Martin-Louis Bright Matthew Horsfall Michael R. Davis Mike Doherty Nicolas Rochelemagne Olaf Alders Olivier Mengue Petr Pisar sanjay-cpu Serguei Trouchelle Shoichi Kaji SkyMarshal Soren Kornetzki Steve Grazzini Stig Palmquist Syohei YOSHIDA Tatsuhiko Miyagawa Tom Hukins Tony Cook Xavier Guimard
   
   =over 4
   
@@ -12131,11 +12131,11 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =item *
   
-  Olivier Mengué <dolmen@cpan.org>
+  Olivier Mengue <dolmen@cpan.org>
   
   =item *
   
-  Petr Písař <ppisar@redhat.com>
+  Petr Pisar <ppisar@redhat.com>
   
   =item *
   
@@ -12155,7 +12155,7 @@ $fatpacked{"HTTP/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_
   
   =item *
   
-  Sören Kornetzki <soeren.kornetzki@delti.com>
+  Soren Kornetzki <soeren.kornetzki@delti.com>
   
   =item *
   
@@ -18801,7 +18801,7 @@ $fatpacked{"Plack/Handler/Apache2.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"
   
   Paul Driver
   
-  Ævar Arnfjörð Bjarmason
+  AEvar Arnfjord Bjarmason
   
   Rafael Kitover
   
@@ -31737,7 +31737,7 @@ $fatpacked{"Try/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TRY_TI
   
   =item *
   
-  יובל קוג'מן (Yuval Kogman) <nothingmuch@woobling.org>
+  yvbl qvg'mn (Yuval Kogman) <nothingmuch@woobling.org>
   
   =item *
   
@@ -31747,7 +31747,7 @@ $fatpacked{"Try/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TRY_TI
   
   =head1 CONTRIBUTORS
   
-  =for stopwords Karen Etheridge Peter Rabbitson Ricardo Signes Mark Fowler Graham Knop Aristotle Pagaltzis Dagfinn Ilmari Mannsåker Lukas Mai Alex anaxagoras Andrew Yates awalker chromatic cm-perl David Lowe Glenn Hans Dieter Pearcey Jens Berthold Jonathan Yu Marc Mims Stosberg Pali Paul Howarth Rudolf Leermakers
+  =for stopwords Karen Etheridge Peter Rabbitson Ricardo Signes Mark Fowler Graham Knop Aristotle Pagaltzis Dagfinn Ilmari Mannsaker Lukas Mai Alex anaxagoras Andrew Yates awalker chromatic cm-perl David Lowe Glenn Hans Dieter Pearcey Jens Berthold Jonathan Yu Marc Mims Stosberg Pali Paul Howarth Rudolf Leermakers
   
   =over 4
   
@@ -31777,7 +31777,7 @@ $fatpacked{"Try/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TRY_TI
   
   =item *
   
-  Dagfinn Ilmari Mannsåker <ilmari@ilmari.org>
+  Dagfinn Ilmari Mannsaker <ilmari@ilmari.org>
   
   =item *
   
@@ -31851,7 +31851,7 @@ $fatpacked{"Try/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TRY_TI
   
   =head1 COPYRIGHT AND LICENCE
   
-  This software is Copyright (c) 2009 by יובל קוג'מן (Yuval Kogman).
+  This software is Copyright (c) 2009 by yvbl qvg'mn (Yuval Kogman).
   
   This is free software, licensed under:
   
@@ -35095,14 +35095,14 @@ $fatpacked{"URI/_punycode.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'U
     use URI::_punycode qw(encode_punycode decode_punycode);
   
     # encode a unicode string
-    my $punycode = encode_punycode('http://☃.net'); # http://.net-xc8g
-    $punycode = encode_punycode('bücher'); # bcher-kva
-    $punycode = encode_punycode('他们为什么不说中文'); # ihqwcrb4cv8a8dqg056pqjye
+    my $punycode = encode_punycode('http://.net'); # http://.net-xc8g
+    $punycode = encode_punycode('bucher'); # bcher-kva
+    $punycode = encode_punycode('Ta Men Wei Shi Yao Bu Shuo Zhong Wen '); # ihqwcrb4cv8a8dqg056pqjye
   
     # decode a punycode string back into a unicode string
-    my $unicode = decode_punycode('http://.net-xc8g'); # http://☃.net
-    $unicode = decode_punycode('bcher-kva'); # bücher
-    $unicode = decode_punycode('ihqwcrb4cv8a8dqg056pqjye'); # 他们为什么不说中文
+    my $unicode = decode_punycode('http://.net-xc8g'); # http://.net
+    $unicode = decode_punycode('bcher-kva'); # bucher
+    $unicode = decode_punycode('ihqwcrb4cv8a8dqg056pqjye'); # Ta Men Wei Shi Yao Bu Shuo Zhong Wen 
   
   =head1 DESCRIPTION
   
@@ -35118,18 +35118,18 @@ $fatpacked{"URI/_punycode.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'U
   
   =head2 encode_punycode
   
-    my $punycode = encode_punycode('http://☃.net');  # http://.net-xc8g
-    $punycode = encode_punycode('bücher'); # bcher-kva
-    $punycode = encode_punycode('他们为什么不说中文') # ihqwcrb4cv8a8dqg056pqjye
+    my $punycode = encode_punycode('http://.net');  # http://.net-xc8g
+    $punycode = encode_punycode('bucher'); # bcher-kva
+    $punycode = encode_punycode('Ta Men Wei Shi Yao Bu Shuo Zhong Wen ') # ihqwcrb4cv8a8dqg056pqjye
   
   Takes a Unicode string (UTF8-flagged variable) and returns a Punycode
   encoding for it.
   
   =head2 decode_punycode
   
-    my $unicode = decode_punycode('http://.net-xc8g'); # http://☃.net
-    $unicode = decode_punycode('bcher-kva'); # bücher
-    $unicode = decode_punycode('ihqwcrb4cv8a8dqg056pqjye'); # 他们为什么不说中文
+    my $unicode = decode_punycode('http://.net-xc8g'); # http://.net
+    $unicode = decode_punycode('bcher-kva'); # bucher
+    $unicode = decode_punycode('ihqwcrb4cv8a8dqg056pqjye'); # Ta Men Wei Shi Yao Bu Shuo Zhong Wen 
   
   Takes a Punycode encoding and returns original Unicode string.
   
@@ -38395,7 +38395,7 @@ $fatpacked{"parent.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'PARENT';
   
   =head1 AUTHORS AND CONTRIBUTORS
   
-  Rafaël Garcia-Suarez, Bart Lateur, Max Maischein, Anno Siegel, Michael Schwern
+  Rafael Garcia-Suarez, Bart Lateur, Max Maischein, Anno Siegel, Michael Schwern
   
   =head1 MAINTAINER
   
