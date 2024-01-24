@@ -41,7 +41,7 @@ jobs:
         run: cpm install --color --no-test --with-develop
 
       - name: Install pause CLI
-        run: cpm install --color --no-test App::pause Data::Sah::Type::str
+        run: cpm install --color --no-test App::pause Data::Sah::Type::str LWP::Protocol::https
 
       - name: Make distribution
         run: ./Dist.SH
